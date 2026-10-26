@@ -1,0 +1,18 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Pizza Order</title></head><body>
+<h1>Pizza Order</h1>
+<form method="post" action="/submit">
+<p><label>Customer name: <input name="custname"></label></p>
+<p><label>Telephone: <input type="tel" name="custtel"></label></p>
+<p><label>E-mail address: <input type="email" name="custemail"></label></p>
+<fieldset><legend>Pizza Size</legend>
+<p><label><input type="radio" name="size" value="small"> Small</label></p>
+<p><label><input type="radio" name="size" value="medium"> Medium</label></p>
+<p><label><input type="radio" name="size" value="large"> Large</label></p></fieldset>
+<fieldset><legend>Pizza Toppings</legend>
+<p><label><input type="checkbox" name="topping" value="bacon"> Bacon</label></p>
+<p><label><input type="checkbox" name="topping" value="cheese"> Extra Cheese</label></p>
+<p><label><input type="checkbox" name="topping" value="onion"> Onion</label></p>
+<p><label><input type="checkbox" name="topping" value="mushroom"> Mushroom</label></p></fieldset>
+<p><label>Delivery instructions: <textarea name="comments"></textarea></label></p>
+<p><button>Submit order</button></p>
+</form></body></html>

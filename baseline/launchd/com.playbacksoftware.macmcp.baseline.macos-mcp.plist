@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The MacOS-MCP baseline server used by baseline/run.py (streamable HTTP on 127.0.0.1:8765). To use it, replace
+     /Users/YOU and /path/to/mac-mcp, copy it to ~/Library/LaunchAgents, and launchctl bootstrap gui/$UID it. -->
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>ANONYMIZED_TELEMETRY</key>
+		<string>false</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.playbacksoftware.macmcp.baseline.macos-mcp</string>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/YOU/.local/bin/macos-mcp</string>
+		<string>serve</string>
+		<string>--transport</string>
+		<string>streamable-http</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>8765</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/path/to/mac-mcp/baseline/logs/macos-mcp.err.log</string>
+	<key>StandardOutPath</key>
+	<string>/path/to/mac-mcp/baseline/logs/macos-mcp.out.log</string>
+</dict>
+</plist>

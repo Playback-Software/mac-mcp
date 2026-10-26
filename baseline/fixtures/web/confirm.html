@@ -1,0 +1,12 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Danger Zone</title></head><body>
+<h1>Danger Zone</h1>
+<button id="del">Delete everything</button>
+<p id="status">Nothing happened yet.</p>
+<script>
+document.getElementById('del').onclick = () => {
+  const ok = confirm('Are you sure you want to delete everything?');
+  const v = ok ? 'confirmed' : 'cancelled';
+  document.getElementById('status').textContent = 'Result: ' + v;
+  fetch('/result?v=' + v);
+};
+</script></body></html>

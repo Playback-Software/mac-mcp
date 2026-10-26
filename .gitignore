@@ -1,0 +1,19 @@
+.build/
+.swiftpm/
+*.xcodeproj/
+.DS_Store
+# eval harness runtime output
+baseline/runs/
+baseline/state/
+baseline/logs/
+baseline/workdir/
+baseline/__pycache__/
+__pycache__/
+
+# Personal agent and editor settings: kept out of the public repo
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+.claude/
+.cursor/
+.codex/
