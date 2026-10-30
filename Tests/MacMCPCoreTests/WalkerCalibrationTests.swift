@@ -11,8 +11,10 @@ private final class SyntheticTree: Sendable {
     private let attrs: Mutex<[AXElement: [String: any Sendable]]>
     private let children = Mutex<[AXElement: [AXElement]]>([:])   // AXUIElement itself isn't Sendable; AXElement is
     private let clock = Mutex<Date>(Date(timeIntervalSince1970: 1000))
+    private let reads = Mutex(0)
     /// How long every node read takes on the synthetic clock.
     let secondsPerRead: TimeInterval
+    var readCount: Int { reads.withLock { $0 } }
 
     init(secondsPerRead: TimeInterval = 0) {
         self.secondsPerRead = secondsPerRead
@@ -30,6 +32,7 @@ private final class SyntheticTree: Sendable {
 
     var source: Walker.Source {
         Walker.Source(read: { [self] el, _ in
+            reads.withLock { $0 += 1 }
             clock.withLock { $0 = $0.addingTimeInterval(secondsPerRead) }
             guard var dict = attrs.withLock({ $0[el] }).map({ $0.mapValues { $0 as Any } }) else { return nil }
             dict["AXChildren"] = children.withLock { $0[el] }?.map(\.raw) ?? []
@@ -69,6 +72,126 @@ private final class SyntheticTree: Sendable {
         t.add(0, role: "AXWindow", children: Array(1...count))
         for i in 1...count { t.add(i, title: "Button \(i)") }
         return t
+    }
+}
+
+@Suite struct FinalSettleWalkTests {
+    private func capture(_ tree: SyntheticTree, options: Walker.Options = Walker.Options()) -> Walker.Capture {
+        var options = options
+        options.source = tree.source
+        let root = SyntheticTree.element(0)
+        let (raw, stats) = Walker.walk(root, options: options)
+        return Walker.Capture(root: root, options: options, tree: raw, stats: stats)
+    }
+
+    @Test func aCompleteWalkIsReusedWithoutReadingOrCountingItTwice() async {
+        let tree = SyntheticTree.wide(30, secondsPerRead: 0)
+        var options = Walker.Options()
+        options.maxNodes = 1500
+        let final = capture(tree, options: options)
+        let reads = tree.readCount
+        let metrics = ActionMetrics.Recorder()
+        let (_, stats) = await ActionMetrics.$current.withValue(metrics) {
+            await ActionMetrics.during(.after) {
+                var next = Walker.Options()
+                next.source = tree.source
+                return Walker.walk(SyntheticTree.element(0), options: next, reusing: final)
+            }
+        }
+        #expect(tree.readCount == reads && stats.complete && stats.visited == 31)
+        let report = metrics.finish(tool: "mac_click", session: "fixture", isError: false)
+        #expect(report.walks == 0 && report.reusedWalks == 1 && report.phases["after"]?.reusedWalks == 1)
+    }
+
+    @Test func reusePreservesTheDiffRefsAndWhatWasShown() async throws {
+        let tree = SyntheticTree.wide(3, secondsPerRead: 0)
+        let refs = RefStore()
+        var before = Snapshot.rows(from: capture(tree).tree, pid: 1)
+        _ = try await refs.record(&before, pid: 1)
+        await refs.markShown(before)
+        tree.add(1, title: "Renamed button")
+        let final = capture(tree)
+        var options = Walker.Options()
+        options.source = tree.source
+        let (reused, _) = Walker.walk(SyntheticTree.element(0), options: options, reusing: final)
+        var after = Snapshot.rows(from: reused, pid: 1)
+        _ = try await refs.record(&after, pid: 1)
+        var fresh = Snapshot.rows(from: capture(tree).tree, pid: 1)
+        _ = try await refs.record(&fresh, pid: 1)
+        #expect(after == fresh)
+        let diff = Diff.compute(before: before, after: after)
+        #expect(!diff.lines.isEmpty && diff.lines == Diff.compute(before: before, after: fresh).lines)
+        let ref = try #require(after.first?.ref)
+        let entry = try #require(await refs.entry(ref))
+        #expect(entry.shown?.label == before.first?.label, "bookkeeping still doesn't mark new labels shown")
+        #expect(RefStore.changeMessage(ref: ref, role: entry.row.role, shown: entry.shown,
+                                      label: entry.row.label, identifier: entry.row.identifier) != nil)
+    }
+
+    @Test func cutsAndReadFailuresAlwaysRequireAFreshWalk() {
+        let tree = SyntheticTree.wide(30, secondsPerRead: 0)
+        let whole = capture(tree)
+        let root = SyntheticTree.element(0)
+        var options = Walker.Options()
+        options.source = tree.source
+        var badStats: [WalkStats] = []
+        for cut in [WalkStats.Truncation.nodes, .depth, .time, .cancelled] {
+            var stats = whole.stats
+            stats.truncation = cut
+            badStats.append(stats)
+        }
+        var unread = whole.stats; unread.readFailures = 1; badStats.append(unread)
+        var identity = whole.stats; identity.identityReadFailures = 1; badStats.append(identity)
+        var text = whole.stats; text.textReadFailures = 1; badStats.append(text)
+        for stats in badStats {
+            let partial = Walker.Capture(root: root, options: options, tree: whole.tree, stats: stats)
+            let reads = tree.readCount
+            let result = Walker.walk(root, options: options, reusing: partial)
+            #expect(tree.readCount > reads && result.1.complete && result.1.visited == 31)
+        }
+    }
+
+    @Test func aNewRootViewportMenuPolicyOrSmallerBudgetCannotReuseTheWalk() {
+        let tree = SyntheticTree.wide(30, secondsPerRead: 0)
+        let whole = capture(tree)
+        let root = SyntheticTree.element(0)
+        #expect(!whole.matches(SyntheticTree.element(1), options: Walker.Options()), "a new window, sheet, dialog or menu bar")
+        var offscreen = Walker.Options()
+        offscreen.clip = CGRect(x: 0, y: 0, width: 100, height: 100)
+        let clipped = capture(tree, options: offscreen)
+        #expect(!clipped.matches(root, options: Walker.Options()), "offscreen=true needs an unclipped walk")
+        offscreen.clip = CGRect(x: 0, y: 0, width: 200, height: 100)
+        #expect(!clipped.matches(root, options: offscreen), "a display change")
+        var menus = Walker.Options(); menus.descendMenus = true
+        #expect(!whole.matches(root, options: menus))
+        var smaller = Walker.Options(); smaller.maxNodes = 10
+        #expect(!whole.matches(root, options: smaller))
+    }
+
+    @Test func settleOffersOnlyItsLastSampleAndNeverAnUnsettledWalk() async {
+        let tree = SyntheticTree.wide(3, secondsPerRead: 0)
+        let first = capture(tree)
+        tree.add(1, title: "Final button")
+        let last = capture(tree)
+        var samples = 0
+        let settled = await Settle.wait(pid: 410_010, quiet: 0, timeout: 60) { _, _ in
+            samples += 1
+            return (42, last.stats, samples == 1 ? first : last)
+        }
+        #expect(settled.settled && samples >= 2)
+        #expect(settled.finalWalk?.tree.children.first?.title == "Final button")
+        let timedOut = await Settle.wait(pid: 410_011, quiet: 250, timeout: 0) { _, _ in (42, last.stats, last) }
+        #expect(!timedOut.settled && timedOut.finalWalk == nil)
+    }
+
+    @Test func aWindowlessFinalSampleCannotOfferAnEarlierWindow() async {
+        let final = capture(.wide(3, secondsPerRead: 0))
+        var samples = 0
+        let result = await Settle.wait(pid: 410_012, quiet: 0, timeout: 60) { _, _ in
+            samples += 1
+            return samples == 1 ? (42, final.stats, final) : (42, nil, nil)
+        }
+        #expect(result.settled && result.finalWalk == nil)
     }
 }
 

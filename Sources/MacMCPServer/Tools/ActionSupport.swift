@@ -91,7 +91,9 @@ private func perform(
         }
         let settle = await ActionMetrics.during(.settle) { await Settle.wait(pid: pid) }
         // A successful action can close the final window (Escape in an Open panel, a close button, cmd+w).
-        let after = try await ActionMetrics.during(.after) { try await actionSnapshot(req, allowMenubar: true) }
+        let after = try await ActionMetrics.during(.after) {
+            try await actionSnapshot(req, allowMenubar: true) { try await Snapshotter.take($0, reusing: settle.finalWalk) }
+        }
         let out = await ActionMetrics.during(.report) {
             let out = report(summary: summary.text, settle: settle, before: before, after: after)
             await RefStore.shared.markShown(out.shownRows)

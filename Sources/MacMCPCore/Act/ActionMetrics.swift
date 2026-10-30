@@ -14,6 +14,7 @@ public enum ActionMetrics {
     public struct Totals: Sendable, Codable {
         public var milliseconds: Double = 0
         public var walks = 0
+        public var reusedWalks = 0
         public var walkMilliseconds: Double = 0
         public var nodes = 0
     }
@@ -23,6 +24,7 @@ public enum ActionMetrics {
         public let session: String
         public let milliseconds: Double
         public let walks: Int
+        public let reusedWalks: Int
         public let walkMilliseconds: Double
         public let nodes: Int
         public let inFlightWalks: Int
@@ -64,6 +66,13 @@ public enum ActionMetrics {
             }
         }
 
+        func reuseWalk(_ phase: Phase) {
+            state.withLock {
+                guard !$0.finished else { return }
+                $0.phases[phase, default: Totals()].reusedWalks += 1
+            }
+        }
+
         /// Freeze before logging: an abandoned guard may still be finishing on its own thread.
         public func finish(tool: String, session: String, isError: Bool) -> Report {
             state.withLock { state in
@@ -74,6 +83,7 @@ public enum ActionMetrics {
                 let totals = state.phases.values
                 return Report(tool: tool, session: session, milliseconds: elapsed,
                               walks: totals.reduce(0) { $0 + $1.walks },
+                              reusedWalks: totals.reduce(0) { $0 + $1.reusedWalks },
                               walkMilliseconds: totals.reduce(0) { $0 + $1.walkMilliseconds },
                               nodes: totals.reduce(0) { $0 + $1.nodes }, inFlightWalks: state.inFlightWalks,
                               isError: isError,

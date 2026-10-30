@@ -120,6 +120,14 @@ rather than one every sample misses (which left every action waiting out the tim
 nothing. Other apps' windows are left out (a notification banner or menu-bar item redrawing would otherwise reset
 the quiet timer), and a cancelled call stops sampling at once.
 
+The final settled walk can supply the immediately following action snapshot. The snapshot still selects its root
+and reads blockers and focus normally, then reuses the raw tree only when the root, clipping bounds and menu
+descent policy match and the walk reached and read everything within the snapshot's node budget. A truncated or
+uncertain walk, a changed window/sheet/dialog, or newly enabled accessibility takes a fresh walk. Rows, refs,
+shown-label accounting and the diff are produced normally from that tree. Full signature sampling and its quiet
+period are unchanged. `MAC_MCP_DEBUG_ACTIONS=1` enables per-action phase and walk measurements in the agent log;
+see [development and testing](testing/development.md#action-measurements).
+
 ## Protocol layer
 
 The agent speaks both protocol eras on every connection:
