@@ -14,7 +14,7 @@ enum SnapshotTool {
             "scope": Prop.string("window (default): the focused window or the sheet/dialog blocking it. app: all "
                 + "windows and menus. dialog: only the sheet/dialog.",
                 enum: SnapshotScope.allCases.map(\.rawValue)),
-            "query": Prop.string("Only rows whose label or value contains this (case-insensitive)."),
+            "query": Prop.string("Only rows whose label or value contains this (case-insensitive): the cheap way to find an element."),
             "max_tokens": Prop.integer("Output budget. Default 1500."),
             "frames": Prop.boolean("Include frames (x,y w×h in screen points)."),
             "text": Prop.boolean("Include static text. Default true."),
