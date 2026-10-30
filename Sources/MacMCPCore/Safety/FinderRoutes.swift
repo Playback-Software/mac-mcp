@@ -459,13 +459,12 @@ extension OpenRoutes {
     /// Why copying or moving `files` into any of `folders` must be refused, or nil: a protected file or a folder
     /// holding one, or a name that would land on (or replace) a protected location.
     public static func transferRefusal(_ files: [URL], into folders: [URL]) -> String? {
-        for file in files {
-            if let r = ProtectedPaths.mutationRefusal(file.path) { return r }
-        }
+        // One resolution of the protected locations serves every file and every landing name.
+        let roots = files.isEmpty ? nil : ProtectedPaths.Roots()
+        if let r = ProtectedPaths.firstMutationRefusal(files.lazy.map(\.path), roots: roots) { return r }
         for folder in folders {
-            for file in files {
-                if let r = ProtectedPaths.mutationRefusal(folder.appendingPathComponent(file.lastPathComponent).path) { return r }
-            }
+            let landing = files.lazy.map { folder.appendingPathComponent($0.lastPathComponent).path }
+            if let r = ProtectedPaths.firstMutationRefusal(landing, roots: roots) { return r }
         }
         return nil
     }

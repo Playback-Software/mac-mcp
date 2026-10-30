@@ -438,7 +438,7 @@ extension OpenRoutes {
 
     public static func mutationSelectionRefusal(_ urls: [URL]?) -> String? {
         guard let urls else { return unreadableSelectionRefusal }
-        return urls.lazy.compactMap { ProtectedPaths.mutationRefusal($0.path) }.first
+        return ProtectedPaths.firstMutationRefusal(urls.lazy.map(\.path))
     }
 
     /// The file panel (Open, Save, Go to Folder) holding `element`, or nil: the nearest sheet, popover, dialog or
@@ -540,8 +540,19 @@ extension OpenRoutes {
     }
 
     public static func moveRefusal(source: URL, destinationFolder: URL?) -> String? {
-        if let r = ProtectedPaths.mutationRefusal(source.path) { return r }
-        guard let destinationFolder else { return "Refused: the destination folder can't be checked. Take mac_snapshot and use folder refs." }
-        return ProtectedPaths.mutationRefusal(destinationFolder.appendingPathComponent(source.lastPathComponent).path)
+        moveRefusal(sources: [source], destinationFolder: destinationFolder)
+    }
+
+    /// Moving each of `sources` into `destinationFolder`, checked with one resolution of the protected locations.
+    public static func moveRefusal(sources: [URL], destinationFolder: URL?) -> String? {
+        var roots: ProtectedPaths.Roots?
+        for source in sources {
+            roots = roots ?? ProtectedPaths.Roots()
+            if let r = ProtectedPaths.firstMutationRefusal([source.path], roots: roots) { return r }
+            guard let destinationFolder else { return "Refused: the destination folder can't be checked. Take mac_snapshot and use folder refs." }
+            let landing = destinationFolder.appendingPathComponent(source.lastPathComponent).path
+            if let r = ProtectedPaths.firstMutationRefusal([landing], roots: roots) { return r }
+        }
+        return nil
     }
 }
