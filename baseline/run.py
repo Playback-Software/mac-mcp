@@ -189,7 +189,7 @@ CURRENT: subprocess.Popen | None = None
 
 def stop(signum, _frame) -> None:
     """SIGINT/SIGTERM: end the running agent session and unwind to main()'s cleanup. Installed explicitly because
-    a background job started from a non-interactive shell (m5.sh under nohup) begins with SIGINT ignored."""
+    a background job started from a non-interactive shell (a script run under nohup) begins with SIGINT ignored."""
     if CURRENT and CURRENT.poll() is None:
         CURRENT.terminate()
     raise KeyboardInterrupt
