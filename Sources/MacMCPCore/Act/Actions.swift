@@ -251,7 +251,7 @@ public enum Actions {
     /// or lost a label source (`Row.identityUncertain`); that, not the whole walk's completeness, decides whether an
     /// empty label can be trusted, so a snapshot truncated elsewhere in a large app doesn't refuse every unnamed
     /// control.
-    public static func resolve(_ target: Target, currentSnapshot: Int) async throws -> Resolved {
+    public static func resolve(_ target: Target, currentSnapshot: Int, refs: RefStore = .shared) async throws -> Resolved {
         switch target {
         case let .point(p):
             // Off every display nothing owns the point, which later checks would misreport as the app having quit.
@@ -265,7 +265,10 @@ public enum Actions {
             let p = try await point(ofPixel: px, screenshot: id)
             return Resolved(pid: pointOwner(p) ?? 0, element: nil, row: nil, point: p, pixel: PixelTarget(screenshot: id, pixel: px))
         case let .ref(r):
-            guard let entry = await RefStore.shared.entry(r) else { throw ActionError(await RefStore.shared.missingMessage(r)) }
+            guard let entry = await refs.entry(r) else { throw ActionError(await refs.missingMessage(r)) }
+            guard entry.shown != nil else {
+                throw ActionError("\(r) was never shown; find it with mac_snapshot query= or take a new snapshot.")
+            }
             if entry.snapshot == currentSnapshot, let el = entry.element {
                 // The snapshot just re-read this element, so its row is current.
                 if let changed = RefStore.changeMessage(ref: r, role: entry.row.role, shown: entry.shown,

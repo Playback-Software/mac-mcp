@@ -186,4 +186,101 @@ import Testing
         #expect(out.text == shown.map { $0.render(frames: false) }.joined(separator: "\n"))
         #expect(!out.text.contains("more rows like this"))
     }
+
+    func summaryCount(_ text: String, containing phrase: String) -> Int {
+        text.components(separatedBy: "\n").filter { $0.contains(phrase) }
+            .compactMap { Int($0.split(separator: " ")[1]) }.reduce(0, +)
+    }
+
+    @Test func selectedButUnfocusedItemSurvivesFolding() {
+        var rows = (0..<40).map { row($0, role: "row", label: "Report \($0) | Ready") }
+        rows[20].states = ["selected"]
+        let out = Snapshot.renderOverview(rows, frames: false, maxTokens: 200)
+        #expect(out.shownRows.contains(rows[20]))
+        #expect(out.text.contains("e20 row \"Report 20 | Ready\" [selected]"))
+        #expect(summaryCount(out.text, containing: "more rows like this") + out.shownRows.count == 40)
+        #expect(out.text.count <= 800)
+    }
+
+    @Test func largeSelectionKeepsItsEndsAndCountsHiddenSelectedItems() {
+        let rows = (0..<40).map { row($0, role: "row", label: "Report \($0) | Ready", states: ["selected"]) }
+        let out = Snapshot.renderOverview(rows, frames: false, maxTokens: 200)
+        #expect(out.shownRows.map(\.ref) == ["e0", "e1", "e2", "e37", "e38", "e39"])
+        #expect(out.text.contains("… 34 more rows like this (34 selected; use query= or scroll)"))
+        #expect(out.omitted == 34 && out.text.count <= 800)
+    }
+
+    @Test func neighbouringUnnamedListsKeepSeparateRuns() {
+        var root = RawNode(role: "AXWindow", title: "Lists")
+        root.children = (0..<2).map { list in
+            var node = RawNode(role: "AXList")
+            node.path = "0.\(list)"
+            node.children = (0..<20).map { index in
+                var item = RawNode(role: "AXRow", title: "List \(list) item \(index)")
+                item.path = "0.\(list).\(index)"
+                return item
+            }
+            return node
+        }
+        var rows = Snapshot.rows(from: root, pid: 7)
+        for i in rows.indices { rows[i].ref = "e\(i)" }
+        #expect(rows[0].parentPath == "0.0" && rows[20].parentPath == "0.1")
+        let out = Snapshot.renderOverview(rows, frames: false, maxTokens: 200)
+        for list in 0..<2 {
+            for index in [0, 1, 2, 19] { #expect(out.shownRows.contains { $0.label == "List \(list) item \(index)" }) }
+        }
+        #expect(out.text.components(separatedBy: "16 more rows like this").count == 3)
+    }
+
+    @Test func namedContainersAreChargedWithTheirControls() {
+        var rows = [row(0, label: "Refresh")]
+        let outer = row(1, role: "group", kind: .context, label: "Document")
+        let toolbar = row(2, role: "toolbar", kind: .context, label: "Actions", depth: 1)
+        rows += [outer, toolbar]
+        rows += (3..<103).map { row($0, depth: 2) }
+        let out = Snapshot.renderOverview(rows, frames: false, maxTokens: 200)
+        #expect(out.shownRows.contains(rows.last!))
+        #expect(out.shownRows.contains(outer) && out.shownRows.contains(toolbar))
+        #expect(out.text.contains("group \"Document\"\n toolbar \"Actions\"\n  e3 button"))
+        #expect(out.text.count <= 800)
+        #expect(summaryCount(out.text, containing: "rows not shown") == out.omitted)
+    }
+
+    @Test func everyCutInAFormHasAnExactCostedMarker() {
+        var rows = (0..<100).map { row($0) }
+        rows[50].states = ["focused"]
+        let out = Snapshot.renderOverview(rows, frames: false, maxTokens: 200)
+        let rendered = out.text.components(separatedBy: "\n")
+        for pair in zip(out.shownRows, out.shownRows.dropFirst()) {
+            let a = rows.firstIndex(of: pair.0)!, b = rows.firstIndex(of: pair.1)!
+            if b > a + 1 {
+                let left = rendered.firstIndex(of: pair.0.render(frames: false))!
+                let right = rendered.firstIndex(of: pair.1.render(frames: false))!
+                #expect(Array(rendered[(left + 1)..<right]) == ["… \(b - a - 1) rows not shown"])
+            }
+        }
+        #expect(summaryCount(out.text, containing: "rows not shown") == out.omitted)
+        #expect(out.text.count <= 800)
+    }
+
+    @Test func droppedExamplesAreIncludedInRunSummaries() {
+        let rows = (0..<40).map { row($0, role: "row", label: "Report \($0) " + String(repeating: "x", count: 190)) }
+        let out = Snapshot.renderOverview(rows, frames: false, maxTokens: 200)
+        #expect(!out.shownRows.isEmpty && out.shownRows.count < 4)
+        #expect(summaryCount(out.text, containing: "more rows like this") == out.omitted)
+        #expect(out.omitted + out.shownRows.count == 40 && out.text.count <= 800)
+    }
+
+    @Test func anUnaffordableRunStillGetsOneExactSummaryWithItsContainer() {
+        let container = row(0, role: "table", kind: .context, label: "Reports")
+        var rows = [container]
+        for i in 0..<40 {
+            rows.append(row(i * 10 + 1, role: "row", label: "Report \(i)", depth: 1))
+            rows += (2..<10).map { row(i * 10 + $0, label: String(repeating: "x", count: 100), depth: 2) }
+        }
+        let out = Snapshot.renderOverview(rows, frames: false, maxTokens: 200)
+        #expect(out.shownRows == [container])
+        #expect(out.text == "table \"Reports\"\n … 40 more rows like this (use query= or scroll)")
+        #expect(out.omitted == 360 && out.text.count <= 800)
+    }
 }

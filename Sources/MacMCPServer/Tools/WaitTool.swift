@@ -103,14 +103,15 @@ enum WaitTool {
                 last = s
                 let matches = matchingRows(s.rows, query: query, until: until)
                 if conditionMet(until: until, matches: matches, stats: s.stats) {
-                    let met = metResponse(sample: s, matches: matches, until: until, query: query, elapsed: elapsed())
-                    await RefStore.shared.markShown(met.shownRows)
-                    return .text(met.text, auditDetail: "\(matches.count) matching rows")
+                    let text = await matchedResponse(sample: s, matches: matches, until: until, query: query, elapsed: elapsed())
+                    return .text(text, auditDetail: "\(matches.count) matching rows")
                 }
                 try await Task.sleep(for: .milliseconds(300))
             }
-            return .error("Timed out after \(Int(timeout)) s waiting for until=\(until) \"\(query)\".\n"
-                + (last.map(timeoutDiagnostic) ?? "No accessibility sample completed. Take mac_snapshot to check the app."))
+            let diagnostic: String
+            if let last { diagnostic = await timeoutResponse(last) }
+            else { diagnostic = "No accessibility sample completed. Take mac_snapshot to check the app." }
+            return .error("Timed out after \(Int(timeout)) s waiting for until=\(until) \"\(query)\".\n" + diagnostic)
         } catch {
             return .error("\(error)")
         }
@@ -120,13 +121,21 @@ enum WaitTool {
     /// ones whose labels count as shown to it): the sentence, then the sample's header and the matching rows, marked.
     static func metResponse(sample: SnapshotResult, matches: [Row], until: String, query: String, elapsed: Int) -> (text: String, shownRows: [Row]) {
         let (body, omitted) = Snapshot.render(matches, frames: false, maxTokens: 600)
+        let shown = Array(matches.prefix(matches.count - omitted))
         let text = "Condition until=\(until) \"\(query)\" met after \(elapsed) ms.\n"
-            + Untrusted.wrap(lines: Array(sample.lines.prefix(2)) + body.components(separatedBy: "\n"))
-        return (text, Array(matches.prefix(matches.count - omitted)))
+            + Untrusted.wrap(lines: sample.headerLines(showing: shown) + body.components(separatedBy: "\n"))
+        return (text, shown)
     }
 
     static func windowText(app: AppInfo, window: WindowEntry, elapsed: Int) -> String {
         "\(app.label) has window \(Untrusted.inline(window.line)) (after \(elapsed) ms)."
+    }
+
+    static func matchedResponse(sample: SnapshotResult, matches: [Row], until: String, query: String, elapsed: Int,
+                                refs: RefStore = .shared) async -> String {
+        let met = metResponse(sample: sample, matches: matches, until: until, query: query, elapsed: elapsed)
+        await refs.markShown(met.shownRows)
+        return met.text
     }
 
     static func matchingRows(_ rows: [Row], query: String, until: String) -> [Row] {
@@ -151,6 +160,11 @@ enum WaitTool {
             notes.append("If the text is visible but absent from accessibility, retry mac_wait until=text ocr=true. Otherwise check app= and scroll to reveal it.")
         }
         return notes.joined(separator: "\n")
+    }
+
+    static func timeoutResponse(_ sample: SnapshotResult, refs: RefStore = .shared) async -> String {
+        await refs.markShown(sample.shownRows)
+        return timeoutDiagnostic(sample)
     }
 
     static func matchingOCR(_ lines: [OCR.Line], query: String) -> [OCR.Line] {
