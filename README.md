@@ -109,6 +109,19 @@ claude mcp add mac -- ssh you@your-mac /Users/you/.local/bin/mac-mcp
 
 `mac-mcp remote-setup` checks this Mac and prints the exact commands for another machine.
 
+### Claude Code plugin
+
+On the Mac itself, Claude Code can install the server entry together with a skill for driving macOS (the
+observe-and-act loop, waits, menus, Save panels, web pages, and when to stop and ask):
+
+```text
+/plugin marketplace add Playback-Software/mac-mcp
+/plugin install mac-mcp@playback-software
+```
+
+The plugin runs `~/.local/bin/mac-mcp`, so install MacMCP first, and remove a `mac` server you added with
+`claude mcp add` to avoid having two. The plugin is in [integrations/claude-code](integrations/claude-code/mac-mcp).
+
 ### A first task
 
 Once the client is connected, give it something small and read-only:
