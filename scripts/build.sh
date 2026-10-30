@@ -17,6 +17,7 @@
 set -euo pipefail
 cd "${0:A:h}/.."
 source "${0:A:h}/toolchain.sh"
+require_toolchain build.sh
 source "${0:A:h}/install-swap.zsh"
 
 APP="$HOME/Applications/MacMCP.app"
@@ -31,6 +32,14 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 install_lock || exit 1
 recover_install || exit 1
+
+# The CLI is installed outside the default PATH on a fresh Mac.
+path_hint() {
+  [[ ":$PATH:" == *":${CLI:h}:"* ]] && return 0
+  print "note: ${CLI:h} is not on your PATH, so \`mac-mcp\` isn't found by name yet."
+  print "  To add it for zsh: echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc, then open a new terminal."
+  print "  Until then, check the install with: $CLI doctor"
+}
 
 # Exits when someone else holds the GUI lease. Uses the installed CLI, the one that knows about the lease.
 check_lease() {
@@ -153,6 +162,7 @@ swap_in || exit 1
 
 if [[ "${1:-}" == "--no-start" ]]; then
   commit_install   # the running agent is untouched, so there is nothing to fall back to yet
+  path_hint
   exit 0
 fi
 
@@ -177,6 +187,7 @@ agent_healthy() {
 
 if "$CLI" install && agent_healthy; then
   commit_install
+  path_hint
   exit 0
 fi
 
