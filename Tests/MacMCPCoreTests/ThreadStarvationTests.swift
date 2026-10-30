@@ -58,13 +58,15 @@ import Testing
         }
         #expect(value == "<<untrusted starvation42>>checked<<end starvation42>>")
         #expect(start.duration(to: .now) < .seconds(1))
-        let gate = DispatchSemaphore(value: 0)
-        defer { gate.signal() }
-        let timeoutStart = ContinuousClock.now
-        await #expect(throws: ActionError.self) {
-            try await Input.guardWork(timeout: 0.05) { gate.wait(); return 0 }
+        await withPrivateGuardPools {
+            let gate = DispatchSemaphore(value: 0)
+            defer { gate.signal() }
+            let timeoutStart = ContinuousClock.now
+            await #expect(throws: ActionError.self) {
+                try await Input.guardWork(timeout: 0.05) { gate.wait(); return 0 }
+            }
+            #expect(timeoutStart.duration(to: .now) < .seconds(1), "the guard timeout also needs an independent thread")
         }
-        #expect(timeoutStart.duration(to: .now) < .seconds(1), "the guard timeout also needs an independent thread")
     }
 
     private final class GlobalPressure: @unchecked Sendable {
