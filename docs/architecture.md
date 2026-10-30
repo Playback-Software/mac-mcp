@@ -240,6 +240,8 @@ reported as exit 1. A call cancelled before it spawns never spawns.
 | --- | --- |
 | `mac-mcp` / `mac-mcp relay` | stdio ⇄ agent socket (what MCP clients run); reconnects if the agent restarts |
 | `mac-mcp doctor` | Health report; falls back to local checks if the agent is unreachable |
+| `mac-mcp setup` | Guided first run at the Mac: session and agent checks, then the Accessibility and Screen Recording grants, the doctor's report, and an offer to add MacMCP to a client. See [Setup](#setup) |
+| `mac-mcp install --client NAME` / `uninstall --client NAME` | Add MacMCP to an AI client's MCP config, or take it out: `[--name mac] [--remote user@host] [--dry-run] [--create]`. See [Registering clients](#registering-clients) |
 | `mac-mcp install` / `uninstall [--purge]` | Install or remove the LaunchAgent (`--purge` also removes the app, its support folder and the approved-policy records in the login keychain) |
 | `mac-mcp start` / `stop` / `restart` / `status` | Control the agent (works over SSH) |
 | `mac-mcp logs [--audit] [-n N]` | Agent log or audit log |
@@ -250,6 +252,61 @@ reported as exit 1. A call cancelled before it spawns never spawns.
 | `mac-mcp remote-setup [--name mac]` | Checks Remote Login, the agent and the policy, then prints the `claude mcp add … -- ssh …` line for another machine. Never touches `~/.ssh` |
 | `mac-mcp version` | The CLI version |
 | `mac-mcp report [--since 7d] [--top N]` | Real use from the audit log: sessions and where they came from, route share (GUI input vs direct routes vs looking), errors and refusals grouped by kind, slowest calls. Evals and tests are counted separately |
+
+### Setup
+
+`mac-mcp setup` is for a person at the Mac, in Terminal (Screen Sharing is fine). It reads the session (console,
+unlocked), checks that the app is installed and the agent is running (offering to start it), and then, for Accessibility
+and Screen Recording in turn, opens the pane (`x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility`
+and `…?Privacy_ScreenCapture`), says what to switch on, and polls every 2 s until the grant shows up. Return skips a step;
+it gives up on one after ten minutes. The grants belong to `MacMCP.app`, not to the CLI, so the poll asks the agent: it
+runs `mac_doctor` and reads its Permissions lines (`PermissionReport` writes and parses them, so the two can't drift). An
+agent that stops answering, as it does while macOS restarts it after a Screen Recording change, is waited for. Setup
+finishes with the doctor's report and offers `install --client`.
+
+Setup only opens panes, asks questions and reads state. It never clicks or toggles a control and never answers a macOS
+prompt (the password or Touch ID dialog is the person's). With no terminal on stdin or stdout, or in an SSH session
+(where a pane would open on a screen nobody is at), it prints the steps with the `open` command for each pane, checks
+once, opens and asks nothing, and exits 1 if anything is missing.
+
+### Registering clients
+
+`mac-mcp install --client NAME` and `uninstall --client NAME` edit a client's user-level MCP config. They leave the
+LaunchAgent and the app alone. The default server name is `mac`; the entry runs `~/.local/bin/mac-mcp`, or with
+`--remote user@host` the same `ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 user@host ~/.local/bin/mac-mcp`
+that `remote-setup` prints.
+
+| `NAME` | File | Entry |
+| --- | --- | --- |
+| `claude-code` | `claude mcp add --scope user` if `claude` is on `PATH`; else `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` if set) | `mcpServers.<name>`: `type`, `command`, `args` |
+| `claude-desktop` | `~/Library/Application Support/Claude/claude_desktop_config.json` | `mcpServers.<name>`: `command`, `args` |
+| `codex` | `~/.codex/config.toml` (`$CODEX_HOME/config.toml` if set) | `[mcp_servers.<name>]` table: `command`, `args` |
+| `cursor` | `~/.cursor/mcp.json` | `mcpServers.<name>`: `command`, `args` |
+| `vscode` | `~/Library/Application Support/Code/User/mcp.json` | `servers.<name>`: `type`, `command`, `args` |
+
+Editing a file:
+- **Only the MacMCP entry changes.** The JSON and TOML are parsed, then the entry's bytes are replaced, inserted or
+  deleted in the original text. Other entries, key order, comments, indentation and line endings stay as they were. VS
+  Code's `mcp.json` may have comments and trailing commas; the other JSON files may not. In `config.toml` the entry is a
+  `[mcp_servers.<name>]` table (and its sub-tables); one written as an inline table or dotted keys is refused, not rewritten.
+  Replacing an entry replaces all of it, including keys you added to it.
+- **Parse errors stop it.** A file that isn't valid JSON or TOML, whose servers key isn't an object, or that names the
+  entry twice is refused with the line, and nothing is written.
+- **Backup, then an atomic write.** The original is copied to `<file>.macmcp-backup-<yyyymmdd-hhmmss>` (same permissions;
+  never overwritten, never deleted), the new file is written beside it and renamed over it, and the result is read back. On
+  a mismatch the original is restored. A file that changed since it was read isn't overwritten. A symlinked config is
+  followed, so the link stays.
+- **`--dry-run`** prints the lines that would change and writes nothing. For Claude Code with the CLI it prints the commands.
+- **A missing folder** (`~/.cursor`, say) means the client isn't installed, so it's an error unless you pass `--create`.
+- Setting an entry that's already there changes nothing and makes no backup. `uninstall` of an entry that isn't there is a no-op.
+
+With the `claude` CLI, `install` runs `claude mcp add --scope user -- …`; if the name already exists it runs `claude mcp
+remove --scope user` first. Claude Code makes its own backups of `~/.claude.json`. If it isn't on `PATH`, the file is edited
+as above; quit open Claude Code sessions first, since one that saves its settings afterwards can undo the edit.
+
+Agents can't do any of this: `ProtectedPaths` refuses them the AI clients' config files (see
+[Policy and security](policy-and-security.md)). The CLI is run by a person in Terminal and doesn't go
+through the agent.
 
 ### Sharing the GUI
 

@@ -297,7 +297,8 @@ and, with the same rules:
   `~/.config/git/config` (Git runs pagers, hooks and `!` aliases from them), `~/.config/fish`, `~/.config/zsh`, and AI
   clients' settings, where an MCP server, a hook or a configured command runs whatever it names: `~/.claude`,
   `~/.claude.json`, `~/.codex`, `~/.cursor` and `~/Library/Application Support/Claude`. An agent that could edit its
-  own client's MCP servers would be outside this policy;
+  own client's MCP servers would be outside this policy. (`mac-mcp install --client`, which a person runs in Terminal, edits
+  these files itself; it never goes through the agent, and agents still can't touch them);
 - the Services cache `pbs` keeps, `~/Library/Caches/com.apple.nsservicescache.plist`: MacMCP refuses the key
   equivalents it lists (see Services below), and a rewritten one could drop them.
 
