@@ -1,0 +1,17 @@
+{
+  "name": "playback-software",
+  "description": "MacMCP: reliable, efficient Mac control for AI agents.",
+  "owner": {
+    "name": "Playback Software",
+    "url": "https://github.com/Playback-Software"
+  },
+  "plugins": [
+    {
+      "name": "mac-mcp",
+      "source": "./integrations/claude-code/mac-mcp",
+      "description": "Connects Claude Code to the MacMCP server on this Mac and adds a skill for driving macOS apps with it.",
+      "category": "automation",
+      "tags": ["macos", "accessibility", "mcp", "gui-automation"]
+    }
+  ]
+}

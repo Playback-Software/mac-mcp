@@ -1,0 +1,18 @@
+{
+  "name": "mac-mcp",
+  "displayName": "MacMCP",
+  "description": "Drive macOS apps through the accessibility tree with MacMCP: the MCP server entry and a skill for using it well.",
+  "author": {
+    "name": "Playback Software",
+    "url": "https://github.com/Playback-Software"
+  },
+  "homepage": "https://github.com/Playback-Software/mac-mcp",
+  "repository": "https://github.com/Playback-Software/mac-mcp",
+  "license": "MIT",
+  "keywords": ["macos", "accessibility", "mcp", "gui-automation", "safari"],
+  "mcpServers": {
+    "mac": {
+      "command": "${HOME}/.local/bin/mac-mcp"
+    }
+  }
+}
