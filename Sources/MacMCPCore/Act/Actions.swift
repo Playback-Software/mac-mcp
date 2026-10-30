@@ -32,7 +32,10 @@ public actor ActionLock {
     /// `DeadlineExceeded` if `body` outlives `deadline` (waiting doesn't count toward it).
     public func run<T: Sendable>(_ name: String = "action", deadline: TimeInterval = 20, maxWait: TimeInterval = 30,
                                  _ body: @escaping @Sendable () async throws -> T) async throws -> T {
-        guard let mine = await acquire(name, maxWait: maxWait) else {
+        let waitingSince = ContinuousClock.now
+        let acquired = await acquire(name, maxWait: maxWait)
+        ActionMetrics.current?.addTime(.lockWait, since: waitingSince)
+        guard let mine = acquired else {
             throw ActionLockBusy(name: name, holder: holder?.name, waited: maxWait)
         }
         let input = Input.Session()

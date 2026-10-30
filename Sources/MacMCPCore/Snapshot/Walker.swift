@@ -114,6 +114,10 @@ public enum Walker {
 
     public static func walk(_ root: AXElement, options: Options = Options()) -> (RawNode, WalkStats) {
         var stats = WalkStats()
+        let metrics = ActionMetrics.current, phase = ActionMetrics.phase
+        let measuredStart = ContinuousClock.now
+        metrics?.startWalk(phase)
+        defer { metrics?.endWalk(phase, since: measuredStart, nodes: stats.visited) }
         let source = options.source
         let started = source.now()
         let deadline = started.addingTimeInterval(options.timeLimit)

@@ -65,13 +65,15 @@ private func perform(
         await RateLimiter.shared.acquire(rate: policy.rateLimitPerSecond)
 
         let req = bookkeepingSnapshot(pid: pid)
-        let before = try await actionSnapshot(req, allowMenubar: name == "menu")
-        var resolved: Resolved?
-        if let target { resolved = try await Actions.resolve(target, currentSnapshot: before.snapshot) }
+        let before = try await ActionMetrics.during(.before) { try await actionSnapshot(req, allowMenubar: name == "menu") }
+        var resolved = try await ActionMetrics.during(.resolve) { () async throws -> Resolved? in
+            if let target { return try await Actions.resolve(target, currentSnapshot: before.snapshot) }
+            return nil
+        }
         // A point meant for app= that lands in another app's window: bring app= forward, then insist.
         if app != nil, let r = resolved, r.point != nil, r.pid != 0, r.pid != pid, let target {
             if let running = NSRunningApplication(processIdentifier: pid) { _ = await AppControl.activate(AppInfo(running)) }
-            resolved = try await Actions.resolve(target, currentSnapshot: before.snapshot)
+            resolved = try await ActionMetrics.during(.resolve) { try await Actions.resolve(target, currentSnapshot: before.snapshot) }
             if let r = resolved, r.pid != 0, r.pid != pid {
                 let other = NSRunningApplication(processIdentifier: r.pid)?.localizedName ?? "another app"
                 return .error("Refused: \(r.describe) is covered by \(other), not \(app!), even with \(app!) "
@@ -81,14 +83,20 @@ private func perform(
         if let r = resolved, let refusal = try await Input.guardWork(pool: .route, timeout: Input.routeTimeout, { targetRefusal(r, checkedPid: pid, policy: policy) }) {
             return .error(refusal, audit: "Refused: target route")
         }
-        let summary = try await ActionRoute.$check.withValue({ step in try await RouteGuards.check(step) }) {
-            try await body(resolved, pid)
+        let actionTarget = resolved
+        let summary = try await ActionMetrics.during(.act) {
+            try await ActionRoute.$check.withValue({ step in try await RouteGuards.check(step) }) {
+                try await body(actionTarget, pid)
+            }
         }
-        let settle = await Settle.wait(pid: pid)
+        let settle = await ActionMetrics.during(.settle) { await Settle.wait(pid: pid) }
         // A successful action can close the final window (Escape in an Open panel, a close button, cmd+w).
-        let after = try await actionSnapshot(req, allowMenubar: true)
-        let out = report(summary: summary.text, settle: settle, before: before, after: after)
-        await RefStore.shared.markShown(out.shownRows)
+        let after = try await ActionMetrics.during(.after) { try await actionSnapshot(req, allowMenubar: true) }
+        let out = await ActionMetrics.during(.report) {
+            let out = report(summary: summary.text, settle: settle, before: before, after: after)
+            await RefStore.shared.markShown(out.shownRows)
+            return out
+        }
         return .text(out.text, auditDetail: actionAudit(resolved, app: app, summary))
     } catch {
         return .error("\(error)", audit: (error as? ActionError)?.audit)
