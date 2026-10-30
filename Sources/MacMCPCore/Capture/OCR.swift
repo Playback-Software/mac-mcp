@@ -1,5 +1,7 @@
 import CoreGraphics
+import CryptoKit
 import Foundation
+import os
 import Vision
 
 /// Text recognition on screenshots, for UI that accessibility can't see: canvases, remote desktops, games, custom-drawn
@@ -31,18 +33,67 @@ public enum OCR {
     }
 
     /// Recognized lines in reading order (top to bottom, then left to right). Vision blocks while it works, so it
-    /// runs on two dedicated native threads.
-    public static func recognize(png: Data, accurate: Bool = true) async throws -> [Line] {
+    /// runs on two dedicated native threads. With a `memo`, a frame whose pixels equal the memo's last one returns
+    /// that frame's lines without running Vision again.
+    public static func recognize(image: CGImage, accurate: Bool = true, memo: Memo? = nil) async throws -> [Line] {
         try await withCheckedThrowingContinuation { continuation in
             threads.async {
-                continuation.resume(with: Result { try recognizeBlocking(png: png, accurate: accurate) })
+                continuation.resume(with: Result {
+                    guard let memo else { return try recognizeBlocking(image: image, accurate: accurate) }
+                    return try memo.lines(for: image, accurate: accurate) {
+                        try recognizeBlocking(image: image, accurate: accurate)
+                    }
+                })
             }
         }
     }
 
-    static func recognizeBlocking(png: Data, accurate: Bool) throws -> [Line] {
-        guard let source = CGImageSourceCreateWithData(png as CFData, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { throw ActionError("Not an image.") }
+    /// The last frame recognized by one wait, so polling an unchanged window costs a hash, not a recognition. It
+    /// holds one entry and lives as long as the wait; nothing is kept across calls.
+    public final class Memo: Sendable {
+        private struct State {
+            var last: (fingerprint: SHA256.Digest, accurate: Bool, lines: [Line])?
+            var reused = 0
+        }
+        private let state = OSAllocatedUnfairLock(initialState: State())
+        public init() {}
+
+        /// Recognitions skipped because the frame matched the last one.
+        public var reused: Int { state.withLock { $0.reused } }
+
+        func lines(for image: CGImage, accurate: Bool, recognize: () throws -> [Line]) throws -> [Line] {
+            let fingerprint = try OCR.fingerprint(image)
+            let hit: [Line]? = state.withLock { s in
+                guard let last = s.last, last.fingerprint == fingerprint, last.accurate == accurate else { return nil }
+                s.reused += 1
+                return last.lines
+            }
+            if let hit { return hit }
+            let lines = try recognize()
+            state.withLock { $0.last = (fingerprint, accurate, lines) }
+            return lines
+        }
+    }
+
+    /// SHA-256 of the frame's size, format and visible pixels (row padding left out). Identical pixels recognize
+    /// identically, so equal fingerprints let a wait reuse the last result; a changed pixel changes it.
+    static func fingerprint(_ image: CGImage) throws -> SHA256.Digest {
+        guard let data = image.dataProvider?.data else { throw ActionError("Not an image.") }
+        var hasher = SHA256()
+        let header = [image.width, image.height, image.bitsPerPixel, Int(image.bitmapInfo.rawValue)]
+        header.withUnsafeBytes { hasher.update(bufferPointer: $0) }
+        let rowBytes = (image.width * image.bitsPerPixel + 7) / 8
+        let stride = image.bytesPerRow
+        let total = CFDataGetLength(data)
+        guard let base = CFDataGetBytePtr(data), rowBytes > 0, stride >= rowBytes,
+              total >= stride * (image.height - 1) + rowBytes else { throw ActionError("Not an image.") }
+        for row in 0..<image.height {
+            hasher.update(bufferPointer: UnsafeRawBufferPointer(start: base + row * stride, count: rowBytes))
+        }
+        return hasher.finalize()
+    }
+
+    static func recognizeBlocking(image: CGImage, accurate: Bool) throws -> [Line] {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = accurate ? .accurate : .fast
         request.usesLanguageCorrection = false   // UI text: labels, file names, numbers
