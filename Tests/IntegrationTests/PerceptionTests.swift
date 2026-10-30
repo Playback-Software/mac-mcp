@@ -5,7 +5,14 @@ import MacMCPCore
 /// End-to-end tests against the installed agent and the TestHost fixture app.
 ///   scripts/build.sh && scripts/build-testhost.sh && MAC_MCP_INTEGRATION=1 swift test --filter IntegrationTests
 /// Needs a logged-in, unlocked GUI session and both permissions granted to MacMCP.
-let integrationEnabled = ProcessInfo.processInfo.environment["MAC_MCP_INTEGRATION"] == "1" && guiFree
+let integrationEnabled: Bool = {
+    guard ProcessInfo.processInfo.environment["MAC_MCP_INTEGRATION"] == "1" else {
+        print("Integration tests skipped: they drive the installed agent and TestHost. Run scripts/integration.sh "
+              + "(see docs/testing/development.md).")
+        return false
+    }
+    return guiFree
+}()
 /// These tests drive the real GUI (some through `open`, past the agent), so they stand down while someone else holds
 /// the GUI lease. scripts/integration.sh takes the lease for the run and passes its token in MAC_MCP_LEASE.
 let guiFree: Bool = {
