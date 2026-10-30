@@ -122,8 +122,8 @@ import Testing
 }
 
 @Suite struct OCRTests {
-    /// Renders text into a PNG the way a canvas app would draw it: pixels only.
-    func render(_ lines: [(String, CGPoint)], size: CGSize = CGSize(width: 600, height: 240)) -> Data {
+    /// Renders text into an image the way a canvas app would draw it: pixels only.
+    func render(_ lines: [(String, CGPoint)], size: CGSize = CGSize(width: 600, height: 240)) -> CGImage {
         let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
                                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
@@ -136,20 +136,66 @@ import Testing
                                     withAttributes: [.font: NSFont.systemFont(ofSize: 22), .foregroundColor: NSColor.black])
         }
         NSGraphicsContext.restoreGraphicsState()
-        return rep.representation(using: .png, properties: [:])!
+        return rep.cgImage!
     }
 
     // GitHub's macOS runners are virtual machines, where Vision's text recognizer may not be able to start. CI
     // (set by GitHub Actions) skips this one test; it runs everywhere else.
     @Test(.timeLimit(.minutes(3)), .enabled(if: ProcessInfo.processInfo.environment["CI"] == nil))
     func recognizesTextWithItsPosition() async throws {
-        let png = render([("Launch Sequence", CGPoint(x: 40, y: 40)), ("Abort 42", CGPoint(x: 360, y: 160))])
-        let lines = try await OCR.recognize(png: png)
+        let image = render([("Launch Sequence", CGPoint(x: 40, y: 40)), ("Abort 42", CGPoint(x: 360, y: 160))])
+        let lines = try await OCR.recognize(image: image)
         let launch = try #require(lines.first { $0.text.contains("Launch") })
         let abort = try #require(lines.first { $0.text.contains("Abort") })
         #expect(launch.center.x < 300 && launch.center.y < 100)
         #expect(abort.center.x > 300 && abort.center.y > 120)
         #expect(lines.firstIndex(of: launch)! < lines.firstIndex(of: abort)!)   // reading order
+    }
+
+    /// A copy of `image` with one pixel changed.
+    func touched(_ image: CGImage) -> CGImage {
+        let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        ctx.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        ctx.fill(CGRect(x: 3, y: 3, width: 1, height: 1))
+        return ctx.makeImage()!
+    }
+
+    @Test func fingerprintFollowsThePixels() throws {
+        let image = render([("Same", CGPoint(x: 40, y: 40))])
+        #expect(try OCR.fingerprint(image) == OCR.fingerprint(image))
+        #expect(try OCR.fingerprint(image) == OCR.fingerprint(render([("Same", CGPoint(x: 40, y: 40))])))
+        #expect(try OCR.fingerprint(image) != OCR.fingerprint(touched(image)))
+        #expect(try OCR.fingerprint(image) != OCR.fingerprint(render([("Same", CGPoint(x: 40, y: 40))], size: CGSize(width: 601, height: 240))))
+    }
+
+    @Test func memoSkipsRecognitionOnlyForUnchangedFrames() throws {
+        final class Counter: @unchecked Sendable { var n = 0 }
+        let counter = Counter()
+        let memo = OCR.Memo()
+        func pass(_ image: CGImage, accurate: Bool = true) throws -> [OCR.Line] {
+            try memo.lines(for: image, accurate: accurate) {
+                counter.n += 1
+                return [OCR.Line(text: "run \(counter.n)", confidence: 1, box: .zero)]
+            }
+        }
+        let frame = render([("Wait", CGPoint(x: 40, y: 40))])
+        #expect(try pass(frame).map(\.text) == ["run 1"])
+        #expect(try pass(render([("Wait", CGPoint(x: 40, y: 40))])).map(\.text) == ["run 1"])   // same pixels, new image
+        #expect(counter.n == 1 && memo.reused == 1)
+        #expect(try pass(touched(frame)).map(\.text) == ["run 2"])   // one pixel differs
+        #expect(try pass(touched(frame), accurate: false).map(\.text) == ["run 3"])   // other recognition level
+        #expect(try pass(frame).map(\.text) == ["run 4"])   // the memo holds the last frame only
+        #expect(counter.n == 4 && memo.reused == 1)
+    }
+
+    @Test(.timeLimit(.minutes(3))) func memoReturnsTheSameLinesForAnUnchangedFrame() async throws {
+        let image = render([("Launch Sequence", CGPoint(x: 40, y: 40))])
+        let memo = OCR.Memo()
+        let first = try await OCR.recognize(image: image, memo: memo)
+        let second = try await OCR.recognize(image: image, memo: memo)
+        #expect(!first.isEmpty && first == second && memo.reused == 1)
     }
 
     @Test func readingOrderGroupsRows() {

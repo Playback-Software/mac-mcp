@@ -68,9 +68,17 @@ public struct ScreenshotMapping: Sendable, Equatable {
 
 public struct Screenshot: Sendable {
     public let id: String
-    public let png: Data
+    /// The captured pixels. OCR reads these directly; PNG is only encoded for a reply that returns the image.
+    public let image: CGImage
     public let mapping: ScreenshotMapping
     public let subject: String
+
+    public func pngData() throws -> Data {
+        guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
+            throw CaptureError.failed("PNG encoding")
+        }
+        return png
+    }
 }
 
 /// Screenshot ids (`c3`) and the mappings behind them. Ids come from `IDBlocks`, so they never repeat across agent
@@ -228,11 +236,8 @@ public enum Capture {
         } catch {
             throw CaptureError.failed("\(error)")
         }
-        guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
-            throw CaptureError.failed("PNG encoding")
-        }
         let mapping = ScreenshotMapping(source: source, pixelSize: CGSize(width: image.width, height: image.height), window: captured)
         let id = try await store.record(mapping)
-        return Screenshot(id: id, png: png, mapping: mapping, subject: subject)
+        return Screenshot(id: id, image: image, mapping: mapping, subject: subject)
     }
 }

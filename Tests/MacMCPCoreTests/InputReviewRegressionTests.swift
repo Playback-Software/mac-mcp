@@ -107,21 +107,23 @@ private final class ReviewTape: @unchecked Sendable {
     @Test func routeBudgetAllowsSlowReadWithoutRelaxingPerStepBudget() async throws {
         // The slow read waits on a gate that the second read opens from its own worker, half a second after its
         // per-step budget has run out, so neither outcome depends on how soon this test's task is scheduled again.
-        let gate = DispatchSemaphore(value: 0)
-        async let slowRead = Input.guardWork(timeout: Input.routeTimeout) {
-            #expect(withUnsafeCurrentTask { $0 == nil })
-            _ = gate.wait(timeout: .now() + 30)
-            return "checked"
-        }
-        #expect(Input.guardTimeout == 0.25)
-        await #expect(throws: ActionError.self) {
-            _ = try await Input.guardWork {
-                Thread.sleep(forTimeInterval: Input.guardTimeout + 0.5)
-                gate.signal()
-                return "too late"
+        try await withPrivateGuardPools { () async throws in
+            let gate = DispatchSemaphore(value: 0)
+            async let slowRead = Input.guardWork(timeout: Input.routeTimeout) {
+                #expect(withUnsafeCurrentTask { $0 == nil })
+                _ = gate.wait(timeout: .now() + 30)
+                return "checked"
             }
+            #expect(Input.guardTimeout == 0.25)
+            await #expect(throws: ActionError.self) {
+                _ = try await Input.guardWork {
+                    Thread.sleep(forTimeInterval: Input.guardTimeout + 0.5)
+                    gate.signal()
+                    return "too late"
+                }
+            }
+            #expect(try await slowRead == "checked")
         }
-        #expect(try await slowRead == "checked")
     }
 
     @Test func gcdGuardsUseTheResponsesNonceAcrossMultipleReads() async throws {

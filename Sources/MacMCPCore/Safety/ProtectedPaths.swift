@@ -59,23 +59,87 @@ public enum ProtectedPaths {
 
     static func servicesCache(home: String) -> String { home + "/Library/Caches/com.apple.nsservicescache.plist" }
 
+    /// The protected locations of one check, resolved: each folder and file in every comparable form, and the
+    /// install staging directories. Resolving costs a few `lstat` calls per location, so a check that covers many
+    /// paths (a selection, a paste) or asks two questions of one path builds it once and passes it along. It is made
+    /// per check and never kept: the next check resolves the links again, so a link swapped in between can't leave
+    /// an outdated answer.
+    struct Roots {
+        let home: String
+        let all: [String]
+        /// Where install staging entries (`.macmcp-stage.*`, `.mac-mcp.new.*`) sit, and their name prefixes.
+        let stages: [(directory: String, prefix: String)]
+
+        init(home: String = Paths.home) {
+            resolutions?.record()
+            self.home = home
+            all = (folders(home: home) + files(home: home)).flatMap { forms(of: $0, relativeTo: "/") }
+            stages = [(home + "/Applications", ".macmcp-stage."), (home + "/.local/bin", ".mac-mcp.new.")]
+                .flatMap { directory, prefix in forms(of: directory, relativeTo: "/").map { ($0, prefix) } }
+        }
+
+        func covers(_ candidate: String) -> Bool {
+            all.contains { r in candidate == r || candidate.hasPrefix(r == "/" ? r : r + "/") } || isStage(candidate)
+        }
+
+        /// Whether a protected location sits inside `candidate`.
+        func holds(inside candidate: String) -> Bool {
+            all.contains { $0.hasPrefix(candidate == "/" ? candidate : candidate + "/") }
+        }
+
+        func isStage(_ path: String) -> Bool {
+            for (base, prefix) in stages where path.hasPrefix(base + "/") {
+                if path.dropFirst(base.count + 1).split(separator: "/").first?.hasPrefix(prefix) == true { return true }
+            }
+            return false
+        }
+    }
+
+    /// Tests count how many times a check resolves the locations.
+    final class ResolutionCount: Sendable {
+        private let n = Locked(0)
+        var value: Int { n.withLock { $0 } }
+        init() {}
+        fileprivate func record() { n.withLock { $0 += 1 } }
+    }
+
+    @TaskLocal static var resolutions: ResolutionCount?
+
     /// Whether `path` is, or is inside, a protected location. `~` is expanded, a relative path is taken against
     /// `base` (the home folder by default), `.` and `..` are resolved, symlinks are followed through the deepest part
     /// that exists (and a Finder alias at the end is resolved), and the comparison ignores case and Unicode form, as
     /// APFS does. Both the written and the resolved path are checked, so neither a link nor a `..` gets around it.
     public static func isProtected(_ path: String, relativeTo base: String? = nil, home: String = Paths.home) -> Bool {
-        let candidates = forms(of: path, relativeTo: base ?? home)
-        let roots = (folders(home: home) + files(home: home)).flatMap { forms(of: $0, relativeTo: "/") }
-        if candidates.contains(where: { c in
-            roots.contains { r in c == r || c.hasPrefix(r == "/" ? r : r + "/") } || isInstallStage(c, home: home)
-        }) { return true }
-        return hardLinkMatches(path, relativeTo: base ?? home, home: home)
+        isProtected(path, relativeTo: base, roots: Roots(home: home))
+    }
+
+    static func isProtected(_ path: String, relativeTo base: String? = nil, roots: Roots) -> Bool {
+        isProtected(path, candidates: forms(of: path, relativeTo: base ?? roots.home), relativeTo: base, roots: roots)
+    }
+
+    private static func isProtected(_ path: String, candidates: Set<String>, relativeTo base: String?, roots: Roots) -> Bool {
+        if candidates.contains(where: roots.covers) { return true }
+        return hardLinkMatches(path, relativeTo: base ?? roots.home, home: roots.home, roots: roots)
     }
 
     /// Why an agent may not touch this path, or nil.
     public static func refusal(_ path: String, relativeTo base: String? = nil) -> String? {
-        guard isProtected(path, relativeTo: base) else { return nil }
-        return message(path)
+        firstRefusal([path], relativeTo: base, roots: nil)
+    }
+
+    /// The message for the first of `paths` that is protected, or nil. The locations are resolved once for all of them.
+    public static func firstRefusal(_ paths: some Sequence<String>, relativeTo base: String? = nil) -> String? {
+        firstRefusal(paths, relativeTo: base, roots: nil)
+    }
+
+    static func firstRefusal(_ paths: some Sequence<String>, relativeTo base: String? = nil, roots: Roots?) -> String? {
+        var roots = roots
+        for path in paths {
+            let r = roots ?? Roots()
+            roots = r
+            if isProtected(path, relativeTo: base, roots: r) { return message(path) }
+        }
+        return nil
     }
 
     static func message(_ path: String) -> String {
@@ -86,33 +150,43 @@ public enum ProtectedPaths {
     /// Opening a containing directory is harmless. Renaming, moving, deleting or replacing it would also replace
     /// protected entries, so mutation routes check ancestors separately instead of protecting all their contents.
     public static func isProtectedFromMutation(_ path: String, relativeTo base: String? = nil, home: String = Paths.home) -> Bool {
-        if isProtected(path, relativeTo: base, home: home) { return true }
-        let candidates = forms(of: path, relativeTo: base ?? home)
-        let roots = (folders(home: home) + files(home: home)).flatMap { forms(of: $0, relativeTo: "/") }
-        return candidates.contains { c in roots.contains { $0.hasPrefix(c == "/" ? c : c + "/") } }
+        isProtectedFromMutation(path, relativeTo: base, roots: Roots(home: home))
+    }
+
+    static func isProtectedFromMutation(_ path: String, relativeTo base: String? = nil, roots: Roots) -> Bool {
+        let candidates = forms(of: path, relativeTo: base ?? roots.home)
+        if isProtected(path, candidates: candidates, relativeTo: base, roots: roots) { return true }
+        return candidates.contains(where: roots.holds)
     }
 
     public static func mutationRefusal(_ path: String, relativeTo base: String? = nil) -> String? {
-        isProtectedFromMutation(path, relativeTo: base) ? message(path) : nil
+        firstMutationRefusal([path], relativeTo: base, roots: nil)
     }
 
-    static func isInstallStage(_ path: String, home: String) -> Bool {
-        for (directory, prefix) in [(home + "/Applications", ".macmcp-stage."), (home + "/.local/bin", ".mac-mcp.new.")] {
-            for base in forms(of: directory, relativeTo: "/") where path.hasPrefix(base + "/") {
-                if path.dropFirst(base.count + 1).split(separator: "/").first?.hasPrefix(prefix) == true { return true }
-            }
+    /// Like `firstRefusal`, for routes that move, rename, delete or replace.
+    public static func firstMutationRefusal(_ paths: some Sequence<String>, relativeTo base: String? = nil) -> String? {
+        firstMutationRefusal(paths, relativeTo: base, roots: nil)
+    }
+
+    static func firstMutationRefusal(_ paths: some Sequence<String>, relativeTo base: String? = nil, roots: Roots?) -> String? {
+        var roots = roots
+        for path in paths {
+            let r = roots ?? Roots()
+            roots = r
+            if isProtectedFromMutation(path, relativeTo: base, roots: r) { return message(path) }
         }
-        return false
+        return nil
     }
 
     /// Only multiply-linked regular files need the more expensive identity walk. No file contents are read, and
     /// identities are fetched anew so an atomic replacement cannot leave an outdated cache authorizing a link.
-    static func hardLinkMatches(_ path: String, relativeTo base: String, home: String) -> Bool {
+    static func hardLinkMatches(_ path: String, relativeTo base: String, home: String, roots: Roots) -> Bool {
         var p = path.trimmingCharacters(in: .whitespacesAndNewlines)
         if let url = URL(string: p), url.isFileURL { p = url.path }
         p = (p as NSString).expandingTildeInPath
         if !p.hasPrefix("/") { p = base + "/" + p }
-        p = aliasTarget(physical(p)) ?? physical(p)
+        let physicalPath = physical(p)
+        p = aliasTarget(physicalPath) ?? physicalPath
         var candidate = stat()
         guard stat(p, &candidate) == 0, candidate.st_mode & S_IFMT == S_IFREG, candidate.st_nlink > 1 else { return false }
         func matches(_ protected: String) -> Bool {
@@ -124,7 +198,7 @@ public enum ProtectedPaths {
         var directories = folders(home: home)
         for directory in [home + "/Applications", home + "/.local/bin"] {
             directories += ((try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? [])
-                .map { directory + "/" + $0 }.filter { isInstallStage(comparable($0), home: home) }
+                .map { directory + "/" + $0 }.filter { roots.isStage(comparable($0)) }
         }
         for directory in directories {
             if matches(directory) { return true }

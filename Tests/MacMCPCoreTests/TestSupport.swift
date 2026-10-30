@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import MacMCPCore
 
 /// Waits for `condition` by reading the state it depends on, not by sleeping a guessed time. The limit only ends a hung
 /// test; it is far above anything a loaded machine needs.
@@ -21,4 +22,14 @@ final class Signal: @unchecked Sendable {
 
     func fire() { sink.yield(); sink.finish() }
     func wait() async { for await _ in stream { return } }
+}
+
+/// Runs `body` on guard pools of its own, sized like the shared ones, wherever it calls `Input.guardWork`. A test that
+/// stalls guard workers on purpose uses this so it can't exhaust the shared pools for the tests running beside it.
+func withPrivateGuardPools<T>(_ body: () async throws -> T) async rethrows -> T {
+    let pools = [
+        "focus": Input.GuardPool(name: "focus", count: 4, stuckAfter: 10 * Input.guardTimeout, max: 12),
+        "route": Input.GuardPool(name: "route", count: 4, stuckAfter: 10 * Input.routeTimeout, max: 16),
+    ]
+    return try await Input.$guardPoolOverrides.withValue(pools, operation: body)
 }

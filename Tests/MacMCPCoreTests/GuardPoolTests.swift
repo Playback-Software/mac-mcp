@@ -5,18 +5,38 @@ import Testing
 @Suite struct GuardPoolTests {
     /// Route checks resolve paths and can hang in the kernel on a dead network mount.
     @Test(.timeLimit(.minutes(1))) func blockedRouteChecksDoNotStarveFocusGuards() async throws {
-        let gate = DispatchSemaphore(value: 0)
-        defer { for _ in 0..<8 { gate.signal() } }
-        async let blocked: Void = withTaskGroup(of: Void.self) { group in
-            for _ in 0..<4 {
-                group.addTask { _ = try? await Input.guardWork(pool: .route, timeout: 0.05) { gate.wait(); return 0 } }
+        try await withPrivateGuardPools {
+            let gate = DispatchSemaphore(value: 0)
+            defer { for _ in 0..<8 { gate.signal() } }
+            async let blocked: Void = withTaskGroup(of: Void.self) { group in
+                for _ in 0..<4 {
+                    group.addTask { _ = try? await Input.guardWork(pool: .route, timeout: 0.05) { gate.wait(); return 0 } }
+                }
             }
+            try await Task.sleep(for: .milliseconds(150))
+            // A focus guard times out 0.25 s after it's queued, so it returns only if a worker took it at once.
+            let value = try await Input.guardWork { 42 }
+            #expect(value == 42)
+            _ = await blocked
         }
-        try await Task.sleep(for: .milliseconds(150))
-        // A focus guard times out 0.25 s after it's queued, so it returns only if a worker took it at once.
-        let value = try await Input.guardWork { 42 }
-        #expect(value == 42)
-        _ = await blocked
+    }
+
+    @Test(.timeLimit(.minutes(1))) func privatePoolsStandInForTheSharedOnesOnlyInsideTheirScope() async throws {
+        #expect(Input.guardPoolOverrides.isEmpty)
+        await withPrivateGuardPools {
+            let gate = DispatchSemaphore(value: 0)
+            defer { for _ in 0..<8 { gate.signal() } }
+            let route = Input.guardPoolOverrides["route"]
+            #expect(route != nil && Input.guardPoolOverrides["focus"] != nil)
+            _ = try? await Input.guardWork(pool: .route, timeout: 0.05) { gate.wait(); return 0 }
+            // The stalled check ran on the private pool's worker, which is still held.
+            await waitUntil("the private route worker to hold the stalled check") { route?.threads.status.busy == 1 }
+        }
+        #expect(Input.guardPoolOverrides.isEmpty)
+        // A pool that is not one of the shared ones is used as given.
+        let own = Input.GuardPool(name: "own", count: 1, stuckAfter: 1, max: 1)
+        let value = try await withPrivateGuardPools { try await Input.guardWork(pool: own) { 5 } }
+        #expect(value == 5)
     }
 
     @Test(.timeLimit(.minutes(1))) func aPoolWithEveryWorkerStuckAddsAReplacement() async throws {

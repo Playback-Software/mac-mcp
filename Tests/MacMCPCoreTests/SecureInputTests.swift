@@ -113,30 +113,32 @@ private final class InputTape: @unchecked Sendable {
     }
 
     @Test func slowGuardRunsOutsideSwiftTasksAndCancelsHeldDragPromptly() async throws {
-        let tape = InputTape(), stalled = DispatchSemaphore(value: 0), returned = Signal()
-        let environment = Input.Environment(check: { _, _ in
-            #expect(withUnsafeCurrentTask { $0 == nil })
-            if tape.nextCheck() == 3 {
-                _ = stalled.wait(timeout: .now() + 30)   // released by the test; the drag must not wait for it
-                returned.fire()
+        try await withPrivateGuardPools {
+            let tape = InputTape(), stalled = DispatchSemaphore(value: 0), returned = Signal()
+            let environment = Input.Environment(check: { _, _ in
+                #expect(withUnsafeCurrentTask { $0 == nil })
+                if tape.nextCheck() == 3 {
+                    _ = stalled.wait(timeout: .now() + 30)   // released by the test; the drag must not wait for it
+                    returned.fire()
+                }
+            }, post: { tape.record($0) })
+            let start = ContinuousClock.now
+            await #expect(throws: ActionError.self) {
+                try await Input.$environment.withValue(environment) {
+                    var timing = Input.DragTiming()
+                    timing.holdMs = 0
+                    try await Input.drag(from: .zero, to: CGPoint(x: 100, y: 100), timing: timing)
+                }
             }
-        }, post: { tape.record($0) })
-        let start = ContinuousClock.now
-        await #expect(throws: ActionError.self) {
-            try await Input.$environment.withValue(environment) {
-                var timing = Input.DragTiming()
-                timing.holdMs = 0
-                try await Input.drag(from: .zero, to: CGPoint(x: 100, y: 100), timing: timing)
-            }
+            #expect(start.duration(to: .now) < .seconds(10))
+            #expect(tape.all.contains { $0.type == .keyDown && $0.key == 53 })
+            #expect(tape.all.last?.type == .leftMouseUp && tape.all.last?.point == .zero)
+            let count = tape.all.count
+            stalled.signal()
+            await returned.wait()   // the late guard has finished; it must not post anything now
+            await Task.yield()
+            #expect(tape.all.count == count)
         }
-        #expect(start.duration(to: .now) < .seconds(10))
-        #expect(tape.all.contains { $0.type == .keyDown && $0.key == 53 })
-        #expect(tape.all.last?.type == .leftMouseUp && tape.all.last?.point == .zero)
-        let count = tape.all.count
-        stalled.signal()
-        await returned.wait()   // the late guard has finished; it must not post anything now
-        await Task.yield()
-        #expect(tape.all.count == count)
     }
 
     @Test func modifiersStayHeldThroughoutOneMultiClick() async throws {

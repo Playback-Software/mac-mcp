@@ -162,9 +162,7 @@ enum RouteGuards {
             }
             if let r = OpenRoutes.transferRefusal(files, into: folders) { return r }
         } else if checksDropFolder(owner: destOwner, panel: OpenRoutes.namingPanel(of: dest) != nil) {
-            for file in files {
-                if let r = OpenRoutes.moveRefusal(source: file, destinationFolder: OpenRoutes.destinationFolder(of: dest)) { return r }
-            }
+            if !files.isEmpty, let r = OpenRoutes.moveRefusal(sources: files, destinationFolder: OpenRoutes.destinationFolder(of: dest)) { return r }
         }
         if !pressed {
             let sourceFolders = isFinder(source.pid) ? OpenRoutes.dropFolders(source) : nil
@@ -302,7 +300,7 @@ enum RouteGuards {
             return "Refused: the files on the clipboard can't be checked. Select them in Finder and copy them with mac_key "
                 + "cmd+c, then paste. A file copied that way and since deleted can't be pasted."
         }
-        return folders.lazy.compactMap { ProtectedPaths.refusal($0.appendingPathComponent("Pasted").path) }.first
+        return ProtectedPaths.firstRefusal(folders.lazy.map { $0.appendingPathComponent("Pasted").path })
     }
 
     static func pasteRefusal(_ policy: Policy, pid: pid_t, clipboard: ClipboardInfo) -> String? {
