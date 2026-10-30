@@ -1,5 +1,15 @@
 # Tools
 
+A person can stop and pause all mutating calls with ⌃⌥⇧⌘. or `mac-mcp pause`. While paused they return:
+
+```text
+Refused: Paused by a person. Ask a person to run `mac-mcp resume` in Terminal.
+```
+
+Read-only tools and list/get variants still work under their existing policy checks. Tell the person and wait;
+there is no resume tool, hotkey toggle or menu action. `mac_doctor` reports the pause state, and input to MacMCP's
+own PID, status item or menu is always refused. See [Person control](policy-and-security.md#a-persons-stop-control).
+
 ```text
 mac_doctor ─▶ mac_snapshot ─▶ mac_click / mac_type / mac_key / mac_menu (by ref) ─▶ diff in the response
                    ▲                                                      │

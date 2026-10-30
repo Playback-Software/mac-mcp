@@ -39,12 +39,17 @@ enum ClipboardTool {
             return .text("Clipboard (\(text.count) chars):\n" + Untrusted.wrap(shown), auditDetail: "get \(text.count) chars")
         case "set":
             guard let text = args.string("text") else { return .error("text is required for action=set.") }
-            let ok = await MainActor.run { () -> Bool in
-                NSPasteboard.general.clearContents()
-                let ok = NSPasteboard.general.setString(text, forType: .string) && NSPasteboard.general.string(forType: .string) == text
-                if ok { ClipboardSafety.noteOwnWrite(changeCount: NSPasteboard.general.changeCount, text: text) }   // pasting this is fine
-                return ok
-            }
+            let ok: Bool
+            do {
+                ok = try await MainActor.run { () throws -> Bool in
+                    try AgentPause.permit?.check()
+                    try Task.checkCancellation()
+                    NSPasteboard.general.clearContents()
+                    let ok = NSPasteboard.general.setString(text, forType: .string) && NSPasteboard.general.string(forType: .string) == text
+                    if ok { ClipboardSafety.noteOwnWrite(changeCount: NSPasteboard.general.changeCount, text: text) }
+                    return ok
+                }
+            } catch { return .error("\(error)") }
             return ok ? .text("Clipboard set (\(text.count) chars). Paste with mac_key keys=\"cmd+v\".", auditDetail: "set \(text.count) chars")
                       : .error("Could not set the clipboard.")
         default:

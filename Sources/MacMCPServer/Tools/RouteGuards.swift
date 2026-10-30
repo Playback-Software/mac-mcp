@@ -34,6 +34,12 @@ enum RouteGuards {
     static func refusal(_ step: ActionRoute.Step, policy: Policy, clipboard: ClipboardInfo,
                         sequence: ActionRoute.KeySequence? = nil) -> String? {
         switch step {
+        case let .key(_, pid), let .text(_, pid), let .target(_, _, pid, _), let .drag(_, _, pid, _):
+            if let r = AgentSafety.refusal(pid: pid) { return r }
+        case let .typing(_, _, pid):
+            if let r = AgentSafety.refusal(pid: pid) { return r }
+        }
+        switch step {
         case let .key(key, pid):
             if let r = OpenRoutes.launcherKeyRefusal([key], policy: policy, appDefines: { key in
                 pid.map { OpenRoutes.menuDefines(key, pid: $0) } ?? false
@@ -73,7 +79,9 @@ enum RouteGuards {
             guard let hit else {
                 return "Refused: the input target can't be checked. Take mac_snapshot and use a ref."
             }
+            if let r = AgentSafety.refusal(pid: hit.pid) { return r }
             let hitPID = point.flatMap { WindowServer.owner(at: $0) } ?? hit.pid
+            if let r = AgentSafety.refusal(pid: hitPID) { return r }
             let remote = NSRunningApplication(processIdentifier: hitPID)?.bundleIdentifier == OpenRoutes.panelService
             let owner = remote ? pid ?? hitPID : hitPID
             if WindowServer.isSystemPrompt(pid: owner) { return "Refused: a person must answer this macOS prompt." }
@@ -383,6 +391,7 @@ enum RouteGuards {
 /// Refuses to manage a window or app that is a macOS security or permission prompt (closing, hiding or quitting one
 /// answers it as surely as clicking its button).
 func promptGuard(_ app: AppInfo) async -> ToolOutput? {
+    if let refusal = AgentSafety.refusal(pid: app.pid) { return .error(refusal) }
     guard WindowServer.isSystemPrompt(pid: app.pid) else { return nil }
     await Alerts.shared.notify(.prompt, "An agent tried to manage a macOS security/permission prompt; it needs a person.")
     return .error("Refused: \(Untrusted.inline(app.name)) is a macOS security or permission prompt. A person must answer it (via Remote "

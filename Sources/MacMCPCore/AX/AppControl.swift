@@ -26,6 +26,7 @@ public enum AppControl {
     /// An app that's already running is only activated (and handed the URL/file); it is never "re-launched".
     /// `target` must already have passed `OpenRoutes.parse` and `OpenRoutes.refusal`.
     public static func launch(_ query: String, open target: URL? = nil, activate: Bool = true) async throws -> AppInfo {
+        try AgentPause.permit?.check()
         try Task.checkCancellation()
         let existing = try? Apps.resolve(query)
         guard let appURL = existing?.bundlePath.map(URL.init(fileURLWithPath:)) ?? Apps.bundleURL(for: query) else {
@@ -41,6 +42,7 @@ public enum AppControl {
                 _ = try await withDeadline(15) {
                     let c = NSWorkspace.OpenConfiguration()
                     c.activates = activates
+                    try AgentPause.permit?.check()
                     try Task.checkCancellation()
                     _ = try await NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: c)
                     return true
@@ -50,6 +52,7 @@ public enum AppControl {
                 _ = try await withDeadline(15) {
                     let c = NSWorkspace.OpenConfiguration()
                     c.activates = activates
+                    try AgentPause.permit?.check()
                     try Task.checkCancellation()
                     _ = try await NSWorkspace.shared.openApplication(at: appURL, configuration: c)
                     return true
@@ -65,6 +68,7 @@ public enum AppControl {
         let bundleID = Bundle(url: appURL)?.bundleIdentifier
         let deadline = Date().addingTimeInterval(10)
         while Date() < deadline {
+            try AgentPause.permit?.check()
             try Task.checkCancellation()
             if let running = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleID && $0.activationPolicy == .regular }),
                running.isFinishedLaunching {
@@ -83,13 +87,13 @@ public enum AppControl {
     /// agent, so it falls back to the accessibility "frontmost" attribute. Returns whether the app ended up frontmost.
     @discardableResult
     public static func activate(_ app: AppInfo) async -> Bool {
-        guard !Task.isCancelled else { return false }
+        guard !Task.isCancelled, AgentPause.permit?.isRevoked != true else { return false }
         guard let running = NSRunningApplication(processIdentifier: app.pid) else { return false }
         if running.isHidden {
-            guard !Task.isCancelled else { return false }
+            guard !Task.isCancelled, AgentPause.permit?.isRevoked != true else { return false }
             running.unhide()
         }
-        guard !Task.isCancelled else { return false }
+        guard !Task.isCancelled, AgentPause.permit?.isRevoked != true else { return false }
         running.activate()
         if await waitFrontmost(app.pid, timeout: 0.6) { return true }
         AXElement.application(pid: app.pid).set(kAXFrontmostAttribute, kCFBooleanTrue as Any)
@@ -98,6 +102,7 @@ public enum AppControl {
             _ = try? await withDeadline(3) {
                 let c = NSWorkspace.OpenConfiguration()
                 c.activates = true
+                try AgentPause.permit?.check()
                 try Task.checkCancellation()
                 _ = try await NSWorkspace.shared.openApplication(at: url, configuration: c)
                 return true
@@ -107,14 +112,14 @@ public enum AppControl {
     }
 
     public static func hide(_ app: AppInfo) -> Bool {
-        guard let running = NSRunningApplication(processIdentifier: app.pid), !Task.isCancelled else { return false }
+        guard let running = NSRunningApplication(processIdentifier: app.pid), !Task.isCancelled, AgentPause.permit?.isRevoked != true else { return false }
         return running.hide()
     }
 
     static func waitFrontmost(_ pid: pid_t, timeout: TimeInterval) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         repeat {
-            guard !Task.isCancelled else { return false }
+            guard !Task.isCancelled, AgentPause.permit?.isRevoked != true else { return false }
             if NSWorkspace.shared.frontmostApplication?.processIdentifier == pid { return true }
             try? await Task.sleep(for: .milliseconds(50))
         } while Date() < deadline
@@ -130,11 +135,11 @@ public enum AppControl {
 
     public static func quit(_ app: AppInfo, force: Bool) async -> QuitOutcome {
         guard let running = NSRunningApplication(processIdentifier: app.pid) else { return .quit }
-        guard !Task.isCancelled else { return .stillRunning }
+        guard !Task.isCancelled, AgentPause.permit?.isRevoked != true else { return .stillRunning }
         _ = force ? running.forceTerminate() : running.terminate()
         let deadline = Date().addingTimeInterval(force ? 3 : 5)
         while Date() < deadline {
-            guard !Task.isCancelled else { return .stillRunning }
+            guard !Task.isCancelled, AgentPause.permit?.isRevoked != true else { return .stillRunning }
             if running.isTerminated { return .quit }
             try? await Task.sleep(for: .milliseconds(100))
         }

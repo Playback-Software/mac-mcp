@@ -23,6 +23,14 @@ _ = Scripts.hostExecutable
 let audit = AuditLog()
 
 let server = MacMCPServer.definition(audit: audit)
+let controls = PersonControl(stopAdditionalWork: { SafariBridge.shared.stop() }) { event, message in
+    log(message)
+    Task.detached {
+        await audit.record(AuditEntry(client: "person", tool: "person_" + event, arguments: [:],
+                                     outcome: event == "control_error" ? "error" : "ok", detail: message, durationMs: 0))
+        if event != "resume" { await Alerts.shared.notify(event.hasPrefix("pause") ? .pause : .control, message) }
+    }
+}
 
 func serve(_ fd: Int32) async {
     await Connection(fd: fd, server: server).run()
@@ -50,29 +58,32 @@ if !state.screenRecording {
 Task { await HealthMonitor.shared.start() }   // permissions, capture, Secure Input, waiting prompts; every 10 min
 OCR.warmUp()   // a cold first load of Vision's recognizer takes about a minute; pay it before anyone waits on it
 
-let listenFD: Int32
-do {
-    listenFD = try UnixSocket.listen(path: Paths.socket)
-} catch {
-    log("cannot listen: \(error)")
-    exit(1)
-}
-log("listening on \(Paths.socket)")
+// A real AppKit event loop: NSWorkspace only keeps its running-application list (and frontmost app) current while
+// its notifications are processed, and a bare RunLoop.main.run() left the list frozen at launch-time contents.
+// Accessory policy: no Dock icon, matching the build script's LSUIElement.
+let application = NSApplication.shared
+application.setActivationPolicy(.accessory)
+let indicator = AgentIndicator(controls: controls, arguments: Array(CommandLine.arguments.dropFirst()))
 
-Thread {
-    while true {
-        let client = accept(listenFD, nil, nil)
-        guard client >= 0 else {
-            // EINTR and ECONNABORTED are momentary; anything else (out of file descriptors) would spin a core.
-            if errno != EINTR, errno != ECONNABORTED {
-                log("accept failed: \(String(cString: strerror(errno))); retrying in 1 s")
-                Thread.sleep(forTimeInterval: 1)   // lint:allow-blocking the accept thread is its own, not the pool
+controls.start {
+    Thread {
+        let listenFD: Int32
+        do { listenFD = try UnixSocket.listen(path: Paths.socket) }
+        catch { log("cannot listen: \(error)"); exit(1) }
+        log("listening on \(Paths.socket)")
+        while true {
+            let client = accept(listenFD, nil, nil)
+            guard client >= 0 else {
+                if errno != EINTR, errno != ECONNABORTED {
+                    log("accept failed: \(String(cString: strerror(errno))); retrying in 1 s")
+                    Thread.sleep(forTimeInterval: 1)   // lint:allow-blocking the accept thread is its own, not the pool
+                }
+                continue
             }
-            continue
+            Task.detached { await serve(client) }
         }
-        Task.detached { await serve(client) }
-    }
-}.start()
+    }.start()
+}
 
 // A stalled agent is worse than a restarted one: record what it was doing, tell a person, and exit so launchd's
 // KeepAlive starts a fresh agent (relays reconnect on their own).
@@ -91,9 +102,4 @@ Watchdog().start { reason in
     exit(70)
 }
 
-// A real AppKit event loop: NSWorkspace only keeps its running-application list (and frontmost app) current while
-// its notifications are processed, and a bare RunLoop.main.run() left the list frozen at launch-time contents.
-// Accessory policy: no Dock icon or menu bar, matching LSUIElement.
-let application = NSApplication.shared
-application.setActivationPolicy(.accessory)
 application.run()

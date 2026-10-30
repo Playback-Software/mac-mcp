@@ -7,7 +7,7 @@ public actor Alerts {
     public static let shared = Alerts()
 
     public enum Kind: String, Sendable {
-        case session, prompt, permission, policy, agent
+        case session, prompt, permission, policy, agent, control, pause
     }
 
     private var lastSent: [Kind: Date] = [:]

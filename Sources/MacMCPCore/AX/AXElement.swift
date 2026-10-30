@@ -130,17 +130,20 @@ public struct AXElement: @unchecked Sendable, Hashable {
 
     @discardableResult
     public func set(_ name: String, _ value: Any) -> AXError {
-        Self.mutate { AXUIElementSetAttributeValue(raw, name as CFString, value as CFTypeRef) }
+        guard AgentSafety.refusal(pid: pid) == nil else { return .cannotComplete }
+        return Self.mutate { AXUIElementSetAttributeValue(raw, name as CFString, value as CFTypeRef) }
     }
 
     @discardableResult
     public func perform(_ action: String) -> AXError {
-        Self.mutate { AXUIElementPerformAction(raw, action as CFString) }
+        guard AgentSafety.refusal(pid: pid) == nil else { return .cannotComplete }
+        return Self.mutate { AXUIElementPerformAction(raw, action as CFString) }
     }
 
     /// Cancellation blocks new requests; an IPC request already sent to an app cannot be recalled.
     static func mutate(_ operation: () -> AXError) -> AXError {
         guard !Task.isCancelled else { return .cannotComplete }
+        do { try AgentPause.permit?.check() } catch { return .cannotComplete }
         return operation()
     }
 
