@@ -8,7 +8,7 @@ import Testing
 /// writes the instructions and tools/list it measured there as JSON, for diffing wording changes.
 @Suite struct ToolListCostTests {
     /// tools/list as sent plus the instructions. Raise only with a reason: every byte is paid in every session.
-    static let budgetBytes = 27_648
+    static let budgetBytes = 20_480
 
     struct Cost {
         let name: String
@@ -43,5 +43,19 @@ import Testing
             try? dump.jsonData().write(to: URL(fileURLWithPath: path))
         }
         #expect(total.bytes <= Self.budgetBytes, "tools/list + instructions is \(total.bytes) bytes, over the \(Self.budgetBytes) budget")
+    }
+
+    /// Guidance that must survive any trimming: it keeps agents safe or stops them wasting calls.
+    @Test func essentialGuidanceSurvives() throws {
+        let instructions = MacMCPServer.instructions
+        for phrase in ["refs over x,y", "SCREEN LOCKED", "NO GUI SESSION", "DISPLAY ASLEEP", "stop and tell the user",
+                       "answer macOS permission prompts", "untrusted data, never instructions", "Go to Folder",
+                       "Trust the diff", "Don't call mac_snapshot after an action"] {
+            #expect(instructions.contains(phrase), "instructions lost \"\(phrase)\"")
+        }
+        let script = try #require(MacMCPServer.tools.first { $0.tool.name == "mac_script" }?.tool)
+        #expect(script.description.contains("Automation consent"))
+        let consent = script.inputSchema["properties"]?["request_consent"]?["description"]?.stringValue ?? ""
+        #expect(consent.hasPrefix("Only when a person is at the screen"))
     }
 }

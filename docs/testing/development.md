@@ -11,6 +11,11 @@ scripts/protocol-probe.py OUT.json                       # record the agent's an
 `build.sh` runs `scripts/lint-blocking.sh` (no thread-blocking calls in agent code) and refuses to replace the agent
 while someone else holds the GUI lease.
 
+Tool descriptions, schemas and the server instructions are in the model's context for the whole session.
+`swift test --skip IntegrationTests --filter ToolListCostTests` prints what they cost (bytes, and tokens estimated at
+4 bytes each) per tool and in total, and fails above a byte budget. Set `MAC_MCP_TOOL_LIST_DUMP=out.json` to also
+write the measured instructions and tool list, for diffing a wording change.
+
 `TestHost` is a small SwiftUI app with known controls (form fields, a secure field, a 60-row list, a sheet, an alert).
 `macmcp-testhost://sheet|alert|dismiss|reset` URLs change its state without clicks.
 

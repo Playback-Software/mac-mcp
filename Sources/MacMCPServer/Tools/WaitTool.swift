@@ -14,21 +14,19 @@ enum WaitTool {
     static let spec = ToolSpec(
         name: "mac_wait",
         description: """
-            Wait for a condition instead of sleeping. settled: the app's UI stops changing. text: some element's \
-            label/value contains query (e.g. a status message). element: an interactive element matching query \
-            appears. gone: nothing matches query any more (a spinner, a sheet). window: the app has a window whose \
-            title contains query. app: an app whose name contains query is frontmost. unlock: the screen is unlocked \
-            and awake (after a SCREEN LOCKED refusal; the person is alerted and unlocks it via Remote Access; \
-            never try to unlock it yourself). Returns as soon as it's true, with the matching elements; on timeout, \
-            says what's there instead. For text drawn in a canvas or custom UI, use until=text with ocr=true \
-            to search screenshots of the app's window instead of accessibility. OCR can misread text.
+            Wait for a condition instead of sleeping. settled: the UI stops changing. text: an element's label or \
+            value contains query. element: an interactive element matching query appears. gone: nothing matches \
+            query (a spinner, a sheet). window: a window title contains query. app: an app whose name contains query \
+            is frontmost. unlock: the screen is unlocked and awake (the person is alerted). Returns as soon as it \
+            holds, with the matches; on timeout, says what's there.
             """,
         properties: [
-            "until": Prop.string("The condition.", enum: conditions),
-            "query": Prop.string("Text to look for (all conditions except settled and unlock)."),
-            "app": Prop.string("App to watch. Default: the frontmost app."),
-            "timeout": Prop.integer("Seconds, default 10, max 60 (unlock: default 300, max 600)."),
-            "ocr": Prop.boolean("until=text only: recognize visible text in the app's window. Default false. Requires Screen Recording."),
+            "until": Prop.string(enum: conditions),
+            "query": Prop.string("Not for settled or unlock."),
+            "app": Prop.string(),
+            "timeout": Prop.integer("Seconds. Default 10, max 60 (unlock: 300, max 600)."),
+            "ocr": Prop.boolean("until=text: search screenshots of the app's window, for text drawn in canvases or "
+                + "custom UI (can misread). Needs Screen Recording."),
         ],
         required: ["until"],
         annotations: .readOnly,

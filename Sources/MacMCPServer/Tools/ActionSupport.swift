@@ -196,10 +196,7 @@ func target(from args: ToolArgs, prefix: String = "") async throws -> Target? {
 }
 
 let targetProperties: [String: Value] = [
-    "ref": Prop.string("Element ref from mac_snapshot (e.g. e12). Preferred."),
-    "x": Prop.integer("Instead of ref: x in screen points, or a pixel x in the screenshot given by screenshot_id."),
-    "y": Prop.integer("Instead of ref: y in screen points, or a pixel y in the screenshot given by screenshot_id."),
-    "screenshot_id": Prop.string("Interpret x,y as pixels of this mac_screenshot (e.g. c3)."),
-    "app": Prop.string("App name or bundle ID, when the target isn't a ref. Default: the frontmost app. With x,y: "
-        + "the app the point is in; it's brought to the front, and the action is refused if another app covers the point."),
+    "ref": Prop.string("From mac_snapshot. Preferred over x,y."),
+    "x": Prop.integer(), "y": Prop.integer(), "screenshot_id": Prop.string(),
+    "app": Prop.string("With x,y: the app at that point (brought to the front; refused if another app covers it)."),
 ]

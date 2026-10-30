@@ -99,15 +99,20 @@ func abandoned(_ tool: String, _ seconds: TimeInterval) -> ToolOutput {
         + "or busy: check with mac_snapshot (or mac_app action=list) before retrying, to avoid repeating an action.")
 }
 
-/// JSON-schema property helpers.
+/// JSON-schema property helpers. Leave the description out when the name, enum and tool description already say it
+/// all: every schema is in the model's context for the whole session.
 public enum Prop {
-    public static func string(_ description: String, enum values: [String]? = nil) -> Value {
-        var p: [String: Value] = ["type": "string", "description": .string(description)]
+    public static func string(_ description: String = "", enum values: [String]? = nil) -> Value {
+        var p = property("string", description)
         if let values { p["enum"] = .array(values.map { .string($0) }) }
         return .object(p)
     }
-    public static func integer(_ description: String) -> Value { .object(["type": "integer", "description": .string(description)]) }
-    public static func boolean(_ description: String) -> Value { .object(["type": "boolean", "description": .string(description)]) }
+    public static func integer(_ description: String = "") -> Value { .object(property("integer", description)) }
+    public static func boolean(_ description: String = "") -> Value { .object(property("boolean", description)) }
+
+    private static func property(_ type: String, _ description: String) -> [String: Value] {
+        description.isEmpty ? ["type": .string(type)] : ["type": .string(type), "description": .string(description)]
+    }
 }
 
 /// Explicit annotations on every tool: some clients (Codex) treat missing hints as destructive.

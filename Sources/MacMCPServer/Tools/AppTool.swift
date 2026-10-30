@@ -8,17 +8,15 @@ enum AppTool {
     static let spec = ToolSpec(
         name: "mac_app",
         description: """
-            Manage apps. list: running apps (frontmost marked). launch: start an app, or bring it up if running; with \
-            open= it opens an http(s) or mailto URL, or a file, in that app (not apps, scripts or other launchers); \
-            waits until a window appears. activate: bring an app to the \
-            front. quit: quit gracefully (reports a blocking save dialog instead of hanging); force=true kills it. \
-            hide: hide the app.
+            list: running apps. launch: start an app or bring it up, and wait for a window; open= opens an http(s) \
+            or mailto URL, or a file, in it (never an app, script or other launcher). activate: bring it to the \
+            front. quit: quit gracefully, reporting a blocking save dialog; force=true kills it. hide.
             """,
         properties: [
-            "action": Prop.string("What to do.", enum: actions),
-            "app": Prop.string("App name (\"TextEdit\") or bundle ID (\"com.apple.TextEdit\"). Required except for list."),
-            "open": Prop.string("launch only: an http(s) or mailto URL, or a file path, to open in the app."),
-            "force": Prop.boolean("quit only: force-quit (unsaved work is lost)."),
+            "action": Prop.string(enum: actions),
+            "app": Prop.string("Name (\"TextEdit\") or bundle ID. Required except for list."),
+            "open": Prop.string("launch: a URL or file path."),
+            "force": Prop.boolean("quit: unsaved work is lost."),
         ],
         required: ["action"],
         annotations: .action,

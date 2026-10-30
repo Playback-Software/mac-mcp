@@ -5,23 +5,18 @@ enum ScreenshotTool {
     static let spec = ToolSpec(
         name: "mac_screenshot",
         description: """
-            Capture pixels when the accessibility snapshot isn't enough (custom-drawn UI, canvases, checking visual \
-            state). Captures an app's frontmost window, or a display (default: the main one; display="list" lists \
-            them). Pass region to zoom into an area at higher detail. The result has a screenshot id (c3): action tools accept x,y pixel coordinates in that \
-            image together with the id. Prefer mac_snapshot refs; screenshots cost far more tokens. ocr=true returns \
-            the text on screen with click points instead of the image (cheap, and works where accessibility sees \
-            nothing: canvases, remote desktops, custom-drawn UI).
+            Pixels of an app's frontmost window or a display (default: the main one), for what the snapshot can't \
+            show; costs far more tokens. ocr=true returns the on-screen text with click points instead of the image \
+            (cheap).
             """,
         properties: [
-            "app": Prop.string("Capture this app's frontmost window. Default: the whole main display."),
-            "display": Prop.string("Capture this display instead of the main one: its number (1 is the main display), "
-                + "display ID, or \"list\" to list displays with their bounds in screen points."),
-            "region": Prop.string("Zoom area in screen points: \"x,y,width,height\" (as in snapshot frames). Without "
-                + "display, the display holding the region's center is used; one image never spans displays."),
-            "max_edge": Prop.integer("Longest image edge in pixels, default 1280. Smaller is cheaper."),
-            "ocr": Prop.boolean("Recognize text and return it as lines with click points instead of an image."),
-            "find": Prop.string("With ocr: only lines containing this text (case-insensitive)."),
-            "image": Prop.boolean("With ocr: also return the image."),
+            "app": Prop.string("Capture this app's frontmost window instead of a display."),
+            "display": Prop.string("Number (1 is the main one), display ID, or \"list\" to list displays."),
+            "region": Prop.string("Zoom area \"x,y,width,height\" in screen points; clipped to the display holding its center."),
+            "max_edge": Prop.integer("Longest edge in pixels. Default 1280."),
+            "ocr": Prop.boolean(),
+            "find": Prop.string("ocr: only lines containing this (case-insensitive)."),
+            "image": Prop.boolean("ocr: also return the image."),
         ],
         annotations: .readOnly,
         // The recognizer's first load on a machine (again after an OS update) takes about a minute; the agent warms it
