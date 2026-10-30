@@ -18,14 +18,13 @@ enum WebTools {
     static let navigate = ToolSpec(
         name: "web_navigate",
         description: """
-            Open a URL in the automation browser (a separate, clean Safari window, not the person's own Safari: no \
-            logins, cookies last for this session only) and return the page as a text tree. Interactive nodes have \
-            uid=N; pass them to web_act. http(s) only, subject to the web policy.
+            Open an http(s) URL in the automation browser, subject to the web policy; cookies last for this session. \
+            Returns the page as a text tree; interactive nodes have uid=N for web_act.
             """,
         properties: [
-            "url": Prop.string("The http(s) URL to open."),
-            "tab": Prop.string("Tab handle from web_tabs (default: the active tab, or a new one)."),
-            "max_chars": Prop.integer("Truncate the page text to this many characters (default 12000)."),
+            "url": Prop.string(),
+            "tab": Prop.string("Handle from web_tabs. Default: the active tab, or a new one."),
+            "max_chars": Prop.integer("Default 12000."),
         ],
         required: ["url"],
         annotations: .action,
@@ -49,13 +48,13 @@ enum WebTools {
     static let read = ToolSpec(
         name: "web_read",
         description: """
-            Read the automation browser's current page: as=text (default; a text tree with uid=N on interactive \
-            nodes), markdown (for reading articles), or screenshot (an image, when layout matters).
+            Read the current page as text (default; a tree with uid=N on interactive nodes), markdown (for articles) \
+            or screenshot (when layout matters).
             """,
         properties: [
-            "as": Prop.string("text (default), markdown or screenshot.", enum: ["text", "markdown", "screenshot"]),
-            "max_chars": Prop.integer("Truncate text to this many characters (default 12000)."),
-            "max_edge": Prop.integer("Screenshot: longest edge in pixels (default 1280)."),
+            "as": Prop.string(enum: ["text", "markdown", "screenshot"]),
+            "max_chars": Prop.integer("Default 12000."),
+            "max_edge": Prop.integer("screenshot: longest edge in pixels. Default 1280."),
         ],
         annotations: .readOnly,
         deadline: { _ in 45 }
@@ -92,29 +91,27 @@ enum WebTools {
     static let act = ToolSpec(
         name: "web_act",
         description: """
-            Do one or more things on the current page, in order: click, type, key, scroll, select (a menu item), \
-            hover. Target a node by uid (from web_navigate/web_read) or find it by visible text. Typed values are \
-            read back to confirm they landed. Returns what changed on the page.
+            Do steps on the current page, in order. Target a node by uid (from web_navigate/web_read) or by visible \
+            text. Typed values are read back. Returns what changed.
             """,
         properties: [
             "actions": .object([
                 "type": "array",
-                "description": "Steps to perform in order.",
                 "items": .object([
                     "type": "object",
                     "properties": .object([
-                        "do": Prop.string("What to do.", enum: ["click", "type", "key", "scroll", "select", "hover"]),
-                        "node": Prop.string("Target uid from the page text (e.g. \"69\")."),
-                        "find": Prop.string("Target by visible text instead of uid (or: the menu item for select)."),
-                        "value": Prop.string("type: the text to type. key: the key name (e.g. Enter, Tab, Escape)."),
-                        "replace": Prop.boolean("type: replace the field's text (default true) instead of appending."),
-                        "submit": Prop.boolean("type: press Return afterwards."),
+                        "do": Prop.string(enum: ["click", "type", "key", "scroll", "select", "hover"]),
+                        "node": Prop.string("uid, e.g. \"69\"."),
+                        "find": Prop.string("Visible text instead of a uid (select: the menu item)."),
+                        "value": Prop.string("type: the text. key: the key name (Enter, Tab, Escape)."),
+                        "replace": Prop.boolean("type: default true; false appends."),
+                        "submit": Prop.boolean("type: press Return after."),
                         "dy": Prop.integer("scroll: pixels down (negative: up). Default 400."),
                     ]),
                     "required": ["do"],
                 ]),
             ]),
-            "full_text": Prop.boolean("Return the whole updated page text instead of what changed."),
+            "full_text": Prop.boolean("Return the whole page text instead of what changed."),
         ],
         required: ["actions"],
         annotations: .action,
@@ -232,10 +229,10 @@ enum WebTools {
     static let eval = ToolSpec(
         name: "web_eval",
         description: """
-            Run JavaScript in the current page (a function body: use return for a value; $uid(N) refers to a node). \
-            Off unless the policy sets web.eval_allowed.
+            Run JavaScript in the current page as a function body (use return for a value; $uid(N) is a node). Off \
+            unless the policy sets web.eval_allowed.
             """,
-        properties: ["expression": Prop.string("JavaScript function body.")],
+        properties: ["expression": Prop.string()],
         required: ["expression"],
         annotations: .action,
         deadline: { _ in 40 }
@@ -259,9 +256,9 @@ enum WebTools {
         name: "web_tabs",
         description: "List, open, switch to or close tabs in the automation browser.",
         properties: [
-            "action": Prop.string("What to do (default list).", enum: ["list", "new", "switch", "close"]),
-            "tab": Prop.string("switch/close: the tab handle from action=list."),
-            "url": Prop.string("new: a URL to open in the new tab."),
+            "action": Prop.string("Default list.", enum: ["list", "new", "switch", "close"]),
+            "tab": Prop.string("Handle from list."),
+            "url": Prop.string("new: URL to open."),
         ],
         annotations: .action,
         deadline: { _ in 60 },
@@ -299,8 +296,8 @@ enum WebTools {
         name: "web_logs",
         description: "The current page's console messages (default) or recorded network requests.",
         properties: [
-            "kind": Prop.string("console (default) or network.", enum: ["console", "network"]),
-            "level": Prop.string("console: only this level and above.", enum: ["debug", "info", "warn", "error"]),
+            "kind": Prop.string(enum: ["console", "network"]),
+            "level": Prop.string("console: minimum level.", enum: ["debug", "info", "warn", "error"]),
         ],
         annotations: .readOnly,
         deadline: { _ in 30 }
@@ -322,12 +319,12 @@ enum WebTools {
     static let dialog = ToolSpec(
         name: "web_dialog",
         description: """
-            JavaScript dialogs (alert, confirm, prompt) block the page until answered: list them, accept (OK, \
-            optionally with text for a prompt) or dismiss (Cancel).
+            JavaScript alert, confirm and prompt dialogs block the page until answered: list them, accept (OK, with \
+            text for a prompt) or dismiss (Cancel).
             """,
         properties: [
-            "action": Prop.string("What to do (default list).", enum: ["list", "accept", "dismiss"]),
-            "text": Prop.string("accept: text to enter into a prompt() dialog."),
+            "action": Prop.string("Default list.", enum: ["list", "accept", "dismiss"]),
+            "text": Prop.string("accept: text for a prompt."),
         ],
         annotations: .action,
         secretArguments: ["text"],

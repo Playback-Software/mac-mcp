@@ -24,6 +24,10 @@ mac_doctor ─▶ mac_snapshot ─▶ mac_click / mac_type / mac_key / mac_menu 
 | `web_tabs` · `web_dialog` · `web_logs` | Tabs; JavaScript alerts, confirms and prompts; console and network logs |
 | `web_eval` | Run JavaScript in the page (off unless the policy allows it) |
 
+An action answers with what it changed, or with the whole new state when a window, sheet or dialog changed, and
+refs from earlier snapshots keep working, so there's no need to snapshot again after it. The result says when one is
+needed: another app came to the front, or the walk after the action was incomplete.
+
 Queries search complete sanitized labels and values, even when their displayed rows are shortened. `mac_wait
 until=gone` requires an accessibility walk that read every element's text; a loading or truncated tree, or one where
 a label, value or child list failed to read, cannot prove a target disappeared (a failed identifier read alone
