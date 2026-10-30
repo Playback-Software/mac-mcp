@@ -254,6 +254,9 @@ extension Input {
         let application = system.element(kAXFocusedApplicationAttribute)?.pid
         let owner = focusOwner(elementPID: focused?.pid, windowPID: focused.flatMap { windowOwner(of: $0) },
                                applicationPID: application, helper: focused.map { isRemoteService($0.pid) } ?? false)
+        if let refusal = AgentSafety.refusal(pid: focused?.pid) ?? AgentSafety.refusal(pid: owner) {
+            throw ActionError(refusal)
+        }
         if let refusal = unreadableFocusRefusal(elementRead: focused != nil, target: pid, windows: windows,
                                                 displays: WindowServer.activeDisplays(), dock: dockPIDs()) {
             throw ActionError(refusal)

@@ -51,6 +51,7 @@ private func perform(
     if let blocked = await sessionGuard() { return blocked }
     do {
         let pid = try await Actions.pid(for: target, app: app)
+        if let refusal = AgentSafety.refusal(pid: pid) { return .error(refusal) }
         if WindowServer.isSystemPrompt(pid: pid) {
             await Alerts.shared.notify(.prompt, "An agent tried to act on a macOS security/permission prompt; it needs a person.")
             return .error("Refused: that is a macOS security or permission prompt. A person must answer it "

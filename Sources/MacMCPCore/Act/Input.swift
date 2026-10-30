@@ -55,13 +55,19 @@ public enum Input {
 
     static func check(pid: pid_t?, keyboard: Bool = false, point: CGPoint? = nil,
                       validate: @escaping @Sendable () throws -> Void = {}, route: ActionRoute.Step? = nil) async throws {
+        try AgentPause.permit?.check()
+        if let refusal = AgentSafety.refusal(pid: pid) { throw ActionError(refusal) }
         try Task.checkCancellation()
         try session?.check()
-        let environment = environment, leaseCheck = leaseCheck, inputSession = session
+        let environment = environment, leaseCheck = leaseCheck, inputSession = session, permit = AgentPause.permit
         try await guardWork {
+            try permit?.check()
             do { try leaseCheck?.check() }
             catch { inputSession?.revoke(); throw error }
             let windows = environment.map { $0.windows?() ?? [] } ?? WindowServer.onScreenWindows()
+            if let point, let refusal = AgentSafety.refusal(pid: WindowServer.owner(at: point, in: windows)) {
+                throw ActionError(refusal)
+            }
             try $guardWindows.withValue(windows) {
                 if let environment { try environment.check(pid, keyboard) }
                 else { try checkBlocking(pid: pid, keyboard: keyboard, windows: windows) }
@@ -73,6 +79,7 @@ public enum Input {
         if ActionRoute.check != nil, route != nil || point != nil {
             try await check(pid: pid, keyboard: keyboard, validate: validate)
         }
+        try AgentPause.permit?.check()
         try Task.checkCancellation()
         try session?.check()
     }

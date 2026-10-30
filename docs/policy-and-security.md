@@ -197,6 +197,69 @@ MacMCP gives whoever can reach it control of the Mac's GUI. The socket is owner-
 listener, and remote access goes through SSH. Password-field values are never shown. Actions refuse to touch macOS
 security and permission prompts, and apps on the policy's deny list.
 
+### A person's stop control
+
+Press **⌃⌥⇧⌘.** (Control–Option–Shift–Command–period), choose **Stop and pause agents** in the
+MacMCP menu bar item, or run `mac-mcp pause`. The hotkey uses Carbon `RegisterEventHotKey`; it needs no
+Input Monitoring grant. It only pauses, even when pressed again or synthesized by an agent. The extra Shift
+avoids macOS's ⌃⌥⌘. increase-contrast shortcut. Apple's [shortcut list](https://support.apple.com/en-us/102650)
+does not assign the four-modifier chord; custom app and user shortcuts may still collide. If registration fails,
+MacMCP starts paused and logs, audits and alerts the failure.
+
+Pausing revokes every admitted mutating call before cancelling its task, including calls waiting for a claim or
+the action lock. They stay revoked after resume. Each input step and accessibility write checks that revocation;
+paired key/button/modifier releases and checked drag cleanup still run. Cancellation terminates script and
+Shortcut subprocess groups. The automation Safari session is stopped too. Already-delivered app IPC and effects
+already committed by an app cannot be recalled; a pause is not a rollback.
+
+All mutating tools, including browser navigation, JavaScript, dialog replies, clipboard writes, apps, windows and
+Shortcuts, return:
+
+```text
+Refused: Paused by a person. Ask a person to run `mac-mcp resume` in Terminal.
+```
+
+Read-only tools and list/get variants still answer, subject to their usual policy and session checks. This lets
+an agent diagnose and report what stopped without adding authority to change the screen. Pausing does not revoke
+permission to read; use the app policy or stop the service if reads must stop too.
+
+Only **`mac-mcp resume`**, run by a person in Terminal, resumes. There is no resume hotkey, MCP tool, menu item,
+AX action or URL handler. MacMCP's own bundle ID and current PID are refused regardless of app policy, including
+coordinate hits on its status item, keyboard focus in its menu, and direct accessibility writes. The CLI talks
+to a separate owner-only Unix socket (`mcp.sock.control` beside the MCP socket); MCP frames and tool arguments
+cannot dispatch its commands. This is the same trust boundary as policy approval: code already running as the
+account can use the CLI or control socket. The socket cannot prove that a human typed the command.
+
+**Keep terminals and shell-equivalent routes denied.** If a person allows Terminal, JXA, an arbitrary-command
+Shortcut or another route that runs code, an agent can arrange a delayed `mac-mcp resume` before being paused.
+Input is refused even in an allowed Terminal while paused, but commands already running there are outside the
+tool gate. Granting that power removes the person-only guarantee; it is outside the tool-only threat model in
+[SECURITY.md](../SECURITY.md). A TTY or a synthetic-key tag would not restore that guarantee.
+
+The restart latch is saved atomically with owner-only permissions in
+`~/Library/Application Support/MacMCP/pause-state`, before accepting tools. Once this file exists, every agent
+restart starts paused, including a watchdog restart after a crash. `mac-mcp resume` opens only the running
+incarnation's memory latch and leaves the disk latch armed. A person must resume after an upgrade or restart,
+even if the agent was running beforehand. This availability trade keeps a crash or failed asynchronous pause
+write from undoing a person's stop. Damaged or unreadable state fails closed; the very first startup creates the
+latch before serving and may run until paused.
+
+The hotkey latches in memory immediately. Native workers handle file synchronization and stopping Safari; logging, audit and webhook work are scheduled away from the main thread.
+Persistence failures leave the running agent paused and are reported. Resume requires a successful state write,
+waits asynchronously behind any pending Safari stop, and a newer pause arriving after the resume request wins.
+
+The menu bar item shows **Agent driving** with the active session or lease holder, or **MacMCP: Paused**. It remains
+visible for five seconds after an action. Its menu has stop, a disabled instruction to use Terminal when paused,
+and **Open log**; it never offers resume. `mac-mcp status` and `mac_doctor` report the pause state.
+
+A person can add `--pause-hotkey ctrl+alt+shift+cmd+period` with another key spec, or `--hide-indicator`, to the
+agent's `ProgramArguments` in its LaunchAgent plist, then restart it. These are agent startup options, separate
+from policy.json: the LaunchAgent and installed executable are protected from tool-driven edits. Changing the
+hotkey or hiding the item therefore requires the same person/code-execution authority as changing the agent's
+launch configuration; it cannot auto-apply as a policy tightening. Hiding the indicator does not disable the hotkey.
+Choose a chord with at least two ordinary modifiers and without a session-ending shortcut. Build/install refreshes
+may replace LaunchAgent arguments, so recheck person-added options after reinstalling.
+
 ### Untrusted text
 
 Text read from the screen, a web page, a script, a shortcut or the clipboard is data, never instructions. Tools

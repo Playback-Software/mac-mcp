@@ -90,6 +90,7 @@ enum DoctorTool {
         for p in health.problems { lines.append("  !!  \(p.summary)") }
         lines.append("")
         lines.append("Control")
+        lines.append("      pause: " + AgentPause.shared.status.summary)
         lines.append("      GUI lease: \(LeaseStore.current().map { "held by \($0.summary); other clients can't act" } ?? "free")")
         lines.append("      session claims: " + (claims.isEmpty ? "none" : claims.joined(separator: "; ")))
         let held = lock.heldFor.map { " for \(Int($0)) s" } ?? ""
@@ -141,7 +142,7 @@ enum DoctorTool {
         lines.append("      agent log: \(Paths.agentLog)")
         lines.append("      audit log: \(Paths.auditLog)")
         lines.append("")
-        lines.append(state.actionBlocker.map { "Actions are BLOCKED: \($0)" } ?? "Actions can run.")
+        lines.append(AgentPause.shared.status.paused ? AgentPause.refusal : state.actionBlocker.map { "Actions are BLOCKED: \($0)" } ?? "Actions can run.")
         return lines.joined(separator: "\n")
     }
 
