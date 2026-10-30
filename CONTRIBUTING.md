@@ -53,6 +53,9 @@ It fails on calls that can wedge the agent's small thread pool (`waitUntilExit`,
 timed waits and others). `build.sh` runs it too. Use `Subprocess`, `Task.sleep` or a dedicated thread instead; a line that
 really must block can say why with `lint:allow-blocking <reason>`.
 
+CI runs `swift build`, `swift test --skip IntegrationTests` and the lint on each pull request and each push to `main`
+(`.github/workflows/ci.yml`, on GitHub-hosted macOS). The OCR unit test skips itself there when `CI` is set.
+
 ## Code and docs
 
 - Match the code around you: naming, idiom and comment density. Comments are sparse, plain and say why, not what.

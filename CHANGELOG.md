@@ -9,7 +9,8 @@ MacMCP is in early development, so tools and policy keys may change before 1.0.
 
 - `CONTRIBUTING.md` and this changelog.
 - A `VERSION` file at the repo root. `scripts/build.sh` reads it, and a unit test fails if the CLI's version differs.
-- A GitHub Actions workflow that builds, runs the unit tests and runs `scripts/lint-blocking.sh` on macOS.
+- A GitHub Actions workflow that builds, runs the unit tests and runs `scripts/lint-blocking.sh` on a macOS 26
+  runner. The OCR unit test skips itself when `CI` is set.
 - README sections for a first task, updating and uninstalling.
 
 ### Changed
