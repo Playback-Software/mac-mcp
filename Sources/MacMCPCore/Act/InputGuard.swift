@@ -40,12 +40,19 @@ extension Input {
                                             _ work: @escaping @Sendable () throws -> T) async throws -> T {
         let reply = GuardReply<T>()
         let token = Untrusted.current
+        let metrics = ActionMetrics.current, phase = ActionMetrics.phase
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 reply.start(continuation)
                 pool.threads.async {
                     guard reply.isPending else { return }
-                    reply.finish(Result { try Untrusted.$responseToken.withValue(token) { try work() } })
+                    reply.finish(Result {
+                        try ActionMetrics.$current.withValue(metrics) {
+                            try ActionMetrics.$phase.withValue(phase) {
+                                try Untrusted.$responseToken.withValue(token) { try work() }
+                            }
+                        }
+                    })
                 }
                 guardTimer.async(after: timeout) {
                     reply.finish(.failure(ActionError("Input targeting could not be checked quickly. Input stopped; take mac_snapshot and retry.")))

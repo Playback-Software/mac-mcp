@@ -23,6 +23,53 @@ Run `swift` with full Xcode selected (`DEVELOPER_DIR=/Applications/Xcode.app/Con
 `xcode-select -s`): TestHost uses SwiftUI macros that the Command Line Tools can't build. The scripts select Xcode
 themselves.
 
+## Action measurements
+
+`scripts/measure-actions.py` measures the installed agent against the installed MacMCPTestHost. Run it only when
+you own the GUI. It takes a process-bound GUI lease and releases it on exit, or uses `MAC_MCP_LEASE` when you
+already hold a lease. It launches TestHost, toggles Bacon, replaces Name with synthetic text, sends the Test menu's
+keyboard shortcut, and chooses Test > Say Hello. It leaves that test state in place. Close TestHost's sheets,
+alerts and menus and reset it before each run; keep its window size, position, and the rest of the desktop the same.
+Handle any macOS prompts yourself. The harness stops on refusals and errors.
+
+Enable diagnostics in the **agent's** environment before starting it. For an agent managed by the GUI LaunchAgent:
+
+```bash
+launchctl setenv MAC_MCP_DEBUG_ACTIONS 1
+mac-mcp restart
+scripts/measure-actions.py -n 30 --warmup 2 --label before --json actions-before.json
+# Install the comparison build, then run the same measurement:
+scripts/measure-actions.py -n 30 --warmup 2 --label after --json actions-after.json
+launchctl unsetenv MAC_MCP_DEBUG_ACTIONS
+mac-mcp restart
+```
+
+Exporting the flag in the measurement shell alone does not affect an agent that is already running. No config
+file edits are needed. For an agent started another way, set `MAC_MCP_DEBUG_ACTIONS=1` in that process's environment.
+The harness does not install, restart or reconfigure the agent. Both builds must include the instrumentation;
+commit `50edfc1` is the instrumented baseline before walk reuse. The harness from the final checkout also works
+against that build. Keep build configuration and policy rate limits identical between runs.
+
+Each measured round runs one click, type, key and menu call. Setup, fresh target snapshots, log reading and the
+warmup rounds are excluded from wall time. The table prints the median and nearest-rank p90 of wall milliseconds,
+actual accessibility walks, and settle milliseconds for each action, plus the number of unsettled responses.
+Wall time covers the whole socket tool exchange, including lock waits, policy checks and audit work. Use a larger
+`-n` for steadier percentiles. `--json` saves every measured call, its counters, and the summary for comparison.
+The two-round warmup allows accessibility enabling and settle calibration to finish before measurement.
+
+With the flag enabled, the agent emits one `debug action_metrics {…}` JSON line per mutating `mac_*` call to
+`~/Library/Logs/MacMCP/agent.log`. It records total walks, nodes, walk milliseconds, in-flight walks at return, and
+wall milliseconds by phase (`guards`, `lock_wait`, `before`, `resolve`, `act`, `settle`, `after`, `report`).
+`guards` includes admission, rate limiting and other time outside the named phases; input and route guards inside
+the action body belong to `act`. Walks on dedicated guard threads keep their caller's phase. `reusedWalks` counts
+walks supplied from settle rather than performed again (absent in the baseline). No tool arguments or screen text
+are recorded. The random socket session id correlates each measurement with its log record, excluding other
+clients. Missing metrics, log rotation, unfinished walks or disconnections stop the run instead of mixing data.
+
+Paths can be overridden with `--cli`, `--socket` (also `MAC_MCP_SOCKET`) and `--log`; the defaults use the current
+user's installed agent. The CLI and socket must address the same installation and GUI lease store. This is a GUI
+benchmark for the parent/operator, not part of unit tests or a command to run in an implementation worktree.
+
 ## Agent task suite
 
 `baseline/` runs real agents against MacMCP: each task gets a fresh headless Claude Code (`claude -p`) whose only
