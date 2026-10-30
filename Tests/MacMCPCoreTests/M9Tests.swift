@@ -139,7 +139,10 @@ import Testing
         return rep.representation(using: .png, properties: [:])!
     }
 
-    @Test(.timeLimit(.minutes(3))) func recognizesTextWithItsPosition() async throws {
+    // GitHub's macOS runners are virtual machines, where Vision's text recognizer may not be able to start. CI
+    // (set by GitHub Actions) skips this one test; it runs everywhere else.
+    @Test(.timeLimit(.minutes(3)), .enabled(if: ProcessInfo.processInfo.environment["CI"] == nil))
+    func recognizesTextWithItsPosition() async throws {
         let png = render([("Launch Sequence", CGPoint(x: 40, y: 40)), ("Abort 42", CGPoint(x: 360, y: 160))])
         let lines = try await OCR.recognize(png: png)
         let launch = try #require(lines.first { $0.text.contains("Launch") })
