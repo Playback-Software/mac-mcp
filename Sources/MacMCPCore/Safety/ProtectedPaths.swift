@@ -35,8 +35,10 @@ public enum ProtectedPaths {
     /// and fish's and zsh's configuration run commands the next time the person uses Git or a shell. AI clients'
     /// settings do the same: an MCP server entry, a hook or a configured command in Claude Code, Codex, Cursor or Claude
     /// Desktop runs whatever it names when the client next starts, outside MacMCP's policy (and they hold logins too).
+    /// VS Code's and Cursor's user folders hold their MCP servers, tasks and settings such as terminal profiles.
     static let codeRunningFolders = [".config/fish", ".config/zsh", ".claude", ".codex", ".cursor",
-                                     "Library/Application Support/Claude"]
+                                     "Library/Application Support/Claude", "Library/Application Support/Code/User",
+                                     "Library/Application Support/Code - Insiders/User", "Library/Application Support/Cursor/User"]
     static let codeRunningFiles = [".gitconfig", ".config/git/config", ".claude.json"]
 
     /// Folders protected with everything in them.
