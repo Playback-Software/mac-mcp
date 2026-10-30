@@ -35,13 +35,22 @@ func closeMenus() throws {
 }
 
 /// Opens a macmcp-testhost:// URL in the host (launching it if needed) and gives SwiftUI a moment to update.
+/// mac_app open= takes only http(s), mailto and file targets, so the URL goes through `open`, past the agent.
 func hostURL(_ command: String) throws {
-    let r = try agent().call("mac_app", ["action": "launch", "app": "com.playbacksoftware.macmcp.testhost",
-                                          "open": "macmcp-testhost://\(command)"])
+    let r = try agent().call("mac_app", ["action": "launch", "app": "com.playbacksoftware.macmcp.testhost"])
     #expect(!r.isError, "launch failed: \(r.text)")
+    let open = try Process.run(URL(fileURLWithPath: "/usr/bin/open"),
+                               arguments: ["-b", "com.playbacksoftware.macmcp.testhost", "macmcp-testhost://\(command)"])
+    open.waitUntilExit()
     // Wait for TestHost to apply it (a fixed sleep raced with SwiftUI's update).
     Thread.sleep(forTimeInterval: 0.2)
     _ = try agent().call("mac_wait", ["app": hostApp, "until": "settled", "timeout": 5])
+}
+
+/// `text` with the untrusted-text marks removed and what they enclose kept: "was <<untrusted k3>>Submit<<end k3>>"
+/// reads "was Submit". Inline marks replace the quotes a tool's message used to put around screen text.
+func unmarked(_ text: String) -> String {
+    text.replacing(/<<untrusted [a-z0-9]+>>\n?/, with: "").replacing(/\n?<<end [a-z0-9]+>>/, with: "")
 }
 
 /// The ref on the first line containing `line`, in a snapshot or a diff ("+ e30 menuitem …").

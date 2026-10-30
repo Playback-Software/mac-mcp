@@ -42,9 +42,12 @@ public struct ToolOutput: Sendable {
         ToolOutput(content: [.text(text)], auditDetail: auditDetail)
     }
 
-    /// A tool-execution error the model should see and act on: say what went wrong and what to do next.
-    public static func error(_ text: String) -> ToolOutput {
-        ToolOutput(content: [.text(text)], isError: true, auditDetail: String(text.prefix(200)))
+    /// A tool-execution error the model should see and act on: say what went wrong and what to do next. `audit` is
+    /// what the log keeps; by default the message with its marked screen text left out.
+    public static func error(_ text: String, audit: String? = nil) -> ToolOutput {
+        // Uncapped here: the audit log removes secrets from the detail first and caps it after (a secret cut in half
+        // by an early cap would survive as a fragment).
+        ToolOutput(content: [.text(text)], isError: true, auditDetail: audit ?? Untrusted.strip(text))
     }
 }
 
@@ -135,7 +138,7 @@ enum PolicyCheck {
 
 /// The current policy, or the refusal to return when it's invalid (agents are blocked until a person fixes it).
 func currentPolicy() async -> PolicyCheck {
-    switch Policy.current() {
+    switch await Policy.current() {
     case let .success(p): return .success(p)
     case let .failure(e):
         await Alerts.shared.notify(.policy, e.description)

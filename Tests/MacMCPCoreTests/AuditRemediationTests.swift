@@ -17,38 +17,38 @@ import Testing
         let store = RefStore()
         var a = Snapshot.rows(from: window(scope: 100001, control: 100003), pid: 7)
         var b = Snapshot.rows(from: window(scope: 100002, control: 100004), pid: 7)
-        _ = await store.record(&a, pid: 7)
-        _ = await store.record(&b, pid: 7)
+        _ = try await store.record(&a, pid: 7)
+        _ = try await store.record(&b, pid: 7)
         #expect(a[0].ref != b[0].ref)
         let original = try #require(await store.entry(a[0].ref!))
         #expect(original.element == a[0].element)
         var again = Snapshot.rows(from: window(scope: 100001, control: 100003, title: "Renamed document"), pid: 7)
-        _ = await store.record(&again, pid: 7)
+        _ = try await store.record(&again, pid: 7)
         #expect(again[0].ref == a[0].ref)
     }
 
-    @Test func ambiguousFingerprintsDoNotRetargetAnOldRef() async {
+    @Test func ambiguousFingerprintsDoNotRetargetAnOldRef() async throws {
         let store = RefStore()
         var root = RawNode(role: "AXWindow")
         root.children = [RawNode(role: "AXButton", title: "Save")]
         var original = Snapshot.rows(from: root, pid: 7)
-        _ = await store.record(&original, pid: 7)
+        _ = try await store.record(&original, pid: 7)
         root.children.append(root.children[0])
         var ambiguous = Snapshot.rows(from: root, pid: 7)
-        _ = await store.record(&ambiguous, pid: 7)
+        _ = try await store.record(&ambiguous, pid: 7)
         #expect(Set(ambiguous.compactMap(\.ref)).count == 2)
         #expect(!ambiguous.contains { $0.ref == original[0].ref })
     }
 
-    @Test func renamedElementsDoNotLeaveOldFingerprintAliases() async {
+    @Test func renamedElementsDoNotLeaveOldFingerprintAliases() async throws {
         let store = RefStore()
         var first = Snapshot.rows(from: window(scope: 100001, control: 100003), pid: 7)
-        _ = await store.record(&first, pid: 7)
+        _ = try await store.record(&first, pid: 7)
         var renamed = Snapshot.rows(from: window(scope: 100001, control: 100003, label: "Export"), pid: 7)
-        _ = await store.record(&renamed, pid: 7)
+        _ = try await store.record(&renamed, pid: 7)
         #expect(renamed[0].ref == first[0].ref)
         var replacement = Snapshot.rows(from: window(scope: 100001, control: 100004), pid: 7)
-        _ = await store.record(&replacement, pid: 7)
+        _ = try await store.record(&replacement, pid: 7)
         #expect(replacement[0].ref != first[0].ref)
     }
 }
@@ -97,7 +97,7 @@ import Testing
             }
         }
         try Actions.verifyTypedValue(secret, expected: secret, mode: .replace)
-        try Actions.verifyTypedValue("prefix" + secret, expected: secret, mode: .append)
+        try Actions.verifyTypedValue("prefix" + secret, expected: secret, mode: .append, original: "prefix")
     }
 }
 
@@ -117,15 +117,16 @@ import Testing
 
     @Test func lateAXRequestIsSuppressedAfterDeadline() async throws {
         let calls = Probe()
-        let finished = Probe()
+        let finished = Probe(), done = Signal()
         let result: Int? = try await Deadline.run(0.02) {
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: .seconds(30))   // cancelled when the deadline passes
             _ = AXElement.mutate { calls.add("late request"); return .success }
             finished.add("finished")
+            done.fire()
             return 1
         }
         #expect(result == nil)
-        for _ in 0..<100 where finished.all.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        await done.wait()
         #expect(finished.all == ["finished"] && calls.all.isEmpty)
     }
 

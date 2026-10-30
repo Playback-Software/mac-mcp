@@ -5,13 +5,11 @@ import Foundation
 public enum AppControlError: Error, CustomStringConvertible {
     case notInstalled(String)
     case launchFailed(String, String)
-    case badTarget(String)
 
     public var description: String {
         switch self {
         case let .notInstalled(q): "No installed app matches \"\(q)\". Pass the exact app name or bundle ID."
         case let .launchFailed(app, why): "Could not launch \(app): \(why)"
-        case let .badTarget(s): "Cannot open \"\(s)\": not a URL or an existing file path."
         }
     }
 }
@@ -26,7 +24,8 @@ func withDeadline<T: Sendable>(_ seconds: TimeInterval, _ operation: @escaping @
 public enum AppControl {
     /// Launches (or re-uses) an app, optionally opening a URL or file in it, and waits until it has a window.
     /// An app that's already running is only activated (and handed the URL/file); it is never "re-launched".
-    public static func launch(_ query: String, open target: String? = nil, activate: Bool = true) async throws -> AppInfo {
+    /// `target` must already have passed `OpenRoutes.parse` and `OpenRoutes.refusal`.
+    public static func launch(_ query: String, open target: URL? = nil, activate: Bool = true) async throws -> AppInfo {
         try Task.checkCancellation()
         let existing = try? Apps.resolve(query)
         guard let appURL = existing?.bundlePath.map(URL.init(fileURLWithPath:)) ?? Apps.bundleURL(for: query) else {
@@ -37,15 +36,7 @@ public enum AppControl {
             return existing
         }
         do {
-            if let target {
-                let url: URL
-                if let u = URL(string: target), u.scheme != nil, u.scheme != "file" || FileManager.default.fileExists(atPath: u.path) {
-                    url = u
-                } else if FileManager.default.fileExists(atPath: (target as NSString).expandingTildeInPath) {
-                    url = URL(fileURLWithPath: (target as NSString).expandingTildeInPath)
-                } else {
-                    throw AppControlError.badTarget(target)
-                }
+            if let url = target {
                 let activates = activate
                 _ = try await withDeadline(15) {
                     let c = NSWorkspace.OpenConfiguration()

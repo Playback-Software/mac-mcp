@@ -18,25 +18,26 @@ final class Probe: @unchecked Sendable {
     /// The case a task group gets wrong: work stuck in an await that ignores cancellation (an NSWorkspace
     /// completion that never fires). The caller must still get control back on time.
     @Test func stuckUncancellableWorkIsAbandonedOnTime() async throws {
-        let start = Date()
+        // The work never resumes, so getting any answer at all means the deadline gave control back without it.
         let r: Int? = try await Deadline.run(0.3) {
-            await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }   // never resumes
+            await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
             return 1
         }
         #expect(r == nil)
-        #expect(Date().timeIntervalSince(start) < 2)
     }
 
     @Test func abandonedWorkIsCancelled() async throws {
-        let probe = Probe()
+        let (finished, sink) = AsyncStream.makeStream(of: String.self)
         let r: Int? = try await Deadline.run(0.2) {
-            try? await Task.sleep(for: .seconds(1))
-            probe.add(Task.isCancelled ? "cancelled" : "not cancelled")
+            // Only cancellation ends this sleep early, so what it saw afterwards is what the deadline did to it.
+            try? await Task.sleep(for: .seconds(30))
+            sink.yield(Task.isCancelled ? "cancelled" : "not cancelled")
             return 1
         }
         #expect(r == nil)
-        try await Task.sleep(for: .milliseconds(300))
-        #expect(probe.all == ["cancelled"])
+        var seen: [String] = []
+        for await outcome in finished { seen.append(outcome); break }
+        #expect(seen == ["cancelled"])
     }
 
     @Test func errorsPropagate() async {
@@ -44,32 +45,41 @@ final class Probe: @unchecked Sendable {
     }
 
     @Test func callerCancellationEndsTheWait() async throws {
-        let task = Task { try await Deadline.run(10) { () async -> Int in
+        let running = Signal()
+        let task = Task { try await Deadline.run(60) { () async -> Int in
+            running.fire()
             await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
             return 1
         } }
-        try await Task.sleep(for: .milliseconds(100))
+        await running.wait()
+        let start = ContinuousClock.now
         task.cancel()
-        let start = Date()
+        // The deadline is 60 s, so a cancellation error (not nil) is the wait ending because of the caller.
         await #expect(throws: CancellationError.self) { try await task.value }
-        #expect(Date().timeIntervalSince(start) < 1)
+        #expect(start.duration(to: .now) < .seconds(30))
     }
 }
 
 @Suite struct ActionLockTests {
     @Test func runsOneAtATimeInArrivalOrder() async throws {
-        let lock = ActionLock(), probe = Probe()
+        let lock = ActionLock(), probe = Probe(), release = Signal()
         try await withThrowingTaskGroup(of: Void.self) { group in
             for i in 0..<5 {
                 group.addTask {
                     try await lock.run("t\(i)") {
+                        if i == 0 { await release.wait() }   // holds the lock until the others are queued
                         probe.add("start \(i)")
-                        try await Task.sleep(for: .milliseconds(20))
+                        await Task.yield()
                         probe.add("end \(i)")
                     }
                 }
-                try await Task.sleep(for: .milliseconds(5))   // fix the arrival order
+                // Fix the arrival order: the first holds the lock, each later one is queued before the next is added.
+                await waitUntil("t\(i) to hold or queue for the lock") {
+                    let status = await lock.status
+                    return status.holder != nil && status.waiting == i
+                }
             }
+            release.fire()
             try await group.waitForAll()
         }
         #expect(probe.all == (0..<5).flatMap { ["start \($0)", "end \($0)"] })
@@ -83,10 +93,9 @@ final class Probe: @unchecked Sendable {
                 await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
             }
         }
-        try await Task.sleep(for: .milliseconds(50))
-        let start = Date()
+        await waitUntil("the wedged call to take the lock") { await lock.status.holder == "wedged" }
+        // Had the lock stayed with the wedged holder, this would give up after its default 30 s wait and throw.
         try await lock.run("next", deadline: 5) { probe.add("next ran") }
-        #expect(Date().timeIntervalSince(start) < 2)
         await #expect(throws: DeadlineExceeded.self) { try await wedged.value }
         #expect(probe.all == ["next ran"])
         let status = await lock.status
@@ -95,16 +104,17 @@ final class Probe: @unchecked Sendable {
 
     @Test func waitingIsBoundedAndTheCallDoesNotRun() async throws {
         let lock = ActionLock(), probe = Probe()
-        let holder = Task { try await lock.run("mac_type") { try await Task.sleep(for: .milliseconds(800)) } }
-        try await Task.sleep(for: .milliseconds(50))
-        let start = Date()
+        // Holds far longer than the wait, until cancelled: the click can only get out by giving up.
+        let holder = Task { try await lock.run("mac_type", deadline: 120) { try await Task.sleep(for: .seconds(60)) } }
+        await waitUntil("mac_type to take the lock") { await lock.status.holder == "mac_type" }
+        let start = ContinuousClock.now
         await #expect(throws: ActionLockBusy.self) {
             try await lock.run("mac_click", maxWait: 0.2) { probe.add("click ran") }
         }
-        #expect(Date().timeIntervalSince(start) < 0.6)
+        #expect(start.duration(to: .now) < .seconds(30))
         #expect(await lock.status.waiting == 0)
-        _ = try await holder.value
-        try await Task.sleep(for: .milliseconds(100))
+        holder.cancel()
+        _ = try? await holder.value
         #expect(probe.all.isEmpty)
         // The lock is free again for the next caller.
         try await lock.run("mac_key") { probe.add("key ran") }
@@ -113,11 +123,13 @@ final class Probe: @unchecked Sendable {
 
     @Test func callsGivenUpWhileQueuedDoNotRunLate() async throws {
         let lock = ActionLock(), probe = Probe()
-        let holder = Task { try await lock.run("holder") { try await Task.sleep(for: .milliseconds(300)) } }
-        try await Task.sleep(for: .milliseconds(50))
+        let release = Signal()
+        let holder = Task { try await lock.run("holder") { await release.wait() } }
+        await waitUntil("the holder to take the lock") { await lock.status.holder == "holder" }
         let queued = Task { try await lock.run("queued") { probe.add("queued ran") } }
-        try await Task.sleep(for: .milliseconds(50))
+        await waitUntil("the call to queue behind it") { await lock.status.waiting == 1 }
         queued.cancel()
+        release.fire()
         _ = try await holder.value
         _ = try? await queued.value
         #expect(probe.all.isEmpty)

@@ -170,13 +170,13 @@ import Testing
     @Test func appsMustBeNamedLiterally() {
         for src in ["set a to \"System Events\"\ntell application a to get name", "tell app (x & \"y\") to quit",
                     "get name of window 1 of application someName", "tell application id x to activate",
-                    "tell «class capp» \"System Events\" to get name"] {
+                    "tell «class capp» \"System Events\" to get name",
+                    "set p to current application\ntell application \"TextEdit\" to get name"] {
             #expect(Scripts.refusal(source: src, language: .applescript, policy: policy) != nil, "\(src)")
         }
         for src in ["tell application \"TextEdit\" to get name", "tell application id \"com.apple.TextEdit\" to activate",
                     "tell application \"TextEdit\"\nignoring application responses\nactivate\nend ignoring\nend tell",
-                    "tell application \"TextEdit\" to set t to (path to frontmost application) as text",
-                    "set p to current application\ntell application \"TextEdit\" to get name"] {
+                    "tell application \"TextEdit\" to set t to (path to frontmost application) as text"] {
             #expect(Scripts.refusal(source: src, language: .applescript, policy: policy) == nil, "\(src)")
         }
     }
@@ -184,7 +184,8 @@ import Testing
     @Test func clipboardFollowsThePolicy() {
         var p = policy
         p.clipboardRead = false
-        #expect(Scripts.refusal(source: "return the clipboard", language: .applescript, policy: p)?.contains("clipboard") == true)
+        // Actual clipboard commands are refused by event code; an app term may legitimately contain this word.
+        #expect(Scripts.refusal(source: "tell application \"TextEdit\" to get clipboard format", language: .applescript, policy: p) == nil)
         #expect(Scripts.refusal(source: "tell application \"TextEdit\" to get \"the clipboard\"", language: .applescript, policy: p) == nil)
     }
 

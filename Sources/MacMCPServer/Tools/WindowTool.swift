@@ -16,12 +16,17 @@ enum WindowTool {
             && !listed.contains(w.pid) && !quiet.contains(w.owner) {
             let running = NSRunningApplication(processIdentifier: w.pid)
             guard policy.permits(bundleID: running?.bundleIdentifier, name: w.owner) else { continue }
-            let what = WindowServer.isSystemPrompt(pid: w.pid) ? " [macOS prompt: a person must answer it]"
+            let what = WindowServer.isSystemPrompt(window: w) ? " [macOS prompt: a person must answer it]"
                 : " → mac_snapshot app=\"\(w.owner)\""
             lines.append("  \(w.owner) (pid \(w.pid)): \"\(w.title)\" @\(w.bounds.minX.safeInt),\(w.bounds.minY.safeInt) "
                 + "\(w.bounds.width.safeInt)x\(w.bounds.height.safeInt)\(what)")
         }
         return lines.isEmpty ? [] : ["Other windows on screen (processes without a Dock icon):"] + lines
+    }
+
+    /// A window as replies name it (the title is the app's own text, so it is marked) and as the log does (without it).
+    static func describe(_ app: AppInfo, _ window: WindowEntry) -> (shown: String, logged: String) {
+        ("\(app.label) window \(window.index) \(Untrusted.inline(window.title))", "\(app.label) window \(window.index)")
     }
 
     static let spec = ToolSpec(
@@ -60,7 +65,7 @@ enum WindowTool {
                 out += ws.map { "  " + $0.line }
             }
             out += otherWindows(listed: Set(Apps.running().map(\.pid)), policy: policy)
-            return .text(out.isEmpty ? "No windows." : out.joined(separator: "\n"))
+            return .text(out.isEmpty ? "No windows." : Untrusted.wrap(lines: out))
         }
         let app: AppInfo
         do {
@@ -72,20 +77,21 @@ enum WindowTool {
 
         if action == "list" {
             let ws = WindowControl.windows(of: app)
-            return .text(ws.isEmpty ? "\(app.label) has no windows." : "\(app.label):\n" + ws.map(\.line).joined(separator: "\n"))
+            return .text(ws.isEmpty ? "\(app.label) has no windows." : Untrusted.wrap(lines: ["\(app.label):"] + ws.map(\.line)))
         }
         return await underActionLock("mac_window") {
             if let blocked = await sessionGuard() { return blocked }
+            if let refused = await promptGuard(app) { return refused }
             guard let w = WindowControl.find(app, args.string("window")) else {
                 let list = WindowControl.windows(of: app).map(\.line)
                 return .error("No matching window in \(app.label)."
-                    + (list.isEmpty ? " It has no windows." : " Windows:\n" + list.joined(separator: "\n")))
+                    + (list.isEmpty ? " It has no windows." : " Windows:\n" + Untrusted.wrap(lines: list)))
             }
-            let detail = "\(app.label) window \(w.index) \"\(w.title)\""
+            let (detail, logged) = describe(app, w)
             switch action {
             case "focus":
                 let ok = await WindowControl.focus(app, w)
-                return ok ? .text("Focused \(detail).", auditDetail: detail)
+                return ok ? .text("Focused \(detail).", auditDetail: logged)
                           : .error("Raised \(detail), but it is not the focused window (a dialog or another app may hold focus).")
             case "move", "resize":
                 let origin = action == "move" ? args.int("x").flatMap { x in args.int("y").map { CGPoint(x: x, y: $0) } } : nil
@@ -99,16 +105,16 @@ enum WindowTool {
                 }
                 guard let f = WindowControl.setFrame(w, origin: origin, size: size) else { return .error("Could not read back \(detail).") }
                 return .text("\(detail) is now at \(f.minX.safeInt),\(f.minY.safeInt) \(f.width.safeInt)x\(f.height.safeInt)"
-                    + " (apps may clamp to their minimum size or the screen).", auditDetail: detail)
+                    + " (apps may clamp to their minimum size or the screen).", auditDetail: logged)
             case "minimize", "restore":
-                return WindowControl.minimize(w, action == "minimize") ? .text("\(action == "minimize" ? "Minimized" : "Restored") \(detail).", auditDetail: detail)
+                return WindowControl.minimize(w, action == "minimize") ? .text("\(action == "minimize" ? "Minimized" : "Restored") \(detail).", auditDetail: logged)
                                                                        : .error("Could not \(action) \(detail).")
             default:   // close
                 guard WindowControl.close(w) else { return .error("\(detail) has no close button.") }
                 try? await Task.sleep(for: .milliseconds(400))
                 let stillOpen = WindowControl.windows(of: app).contains { $0.element == w.element }
                 return .text(stillOpen ? "Pressed close on \(detail); it is still open, likely asking to save. Check mac_snapshot scope=dialog."
-                                       : "Closed \(detail).", auditDetail: detail)
+                                       : "Closed \(detail).", auditDetail: logged)
             }
         }
     }

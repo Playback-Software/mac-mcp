@@ -34,6 +34,8 @@ public actor HealthMonitor {
         public var capturableWindows = 0
         public var secureInput: (pid: pid_t, name: String)?
         public var prompts: [(owner: String, text: String)] = []
+        /// Guard workers stuck in a blocking call (an unresponsive network mount), per pool. Needs no GUI session.
+        public var stuckGuards: [(pool: String, count: Int, oldest: TimeInterval)] = []
         public init() {}
     }
 
@@ -78,7 +80,17 @@ public actor HealthMonitor {
         for p in o.prompts {
             out.append(Problem(kind: .prompt, summary: promptSummary(owner: p.owner, text: p.text)))
         }
-        return out
+        return out + stuckProblems(o)
+    }
+
+    /// Route and focus checks run on bounded workers; one blocked in the kernel for 10× its timeout is lost until the
+    /// call returns. The pool adds replacements, but a hung SMB/NFS mount will keep using them up.
+    static func stuckProblems(_ o: Observation) -> [Problem] {
+        o.stuckGuards.map {
+            Problem(kind: .agent, summary: "\($0.count) \($0.pool) check worker\($0.count == 1 ? " is" : "s are") stuck, the oldest for "
+                + "\(Int($0.oldest)) s: a filesystem call is not returning, usually an unresponsive network mount (SMB/NFS). "
+                + "Checks on other paths still run, but input may be refused until it recovers. Unmount or reconnect it.")
+        }
     }
 
     /// What a waiting macOS prompt is, with a specific fix for the ones we know.
@@ -100,7 +112,7 @@ public actor HealthMonitor {
         let o = await observe()
         if let skipped = o.skipped {
             secureInputSince = nil
-            let report = Report(checkedAt: now, skipped: skipped, problems: [])
+            let report = Report(checkedAt: now, skipped: skipped, problems: Self.stuckProblems(o))
             last = report
             return report
         }
@@ -124,6 +136,7 @@ public actor HealthMonitor {
     @Sendable public static func observeSystem() async -> Observation {
         let state = SessionState.current()
         var o = Observation()
+        o.stuckGuards = Input.stuckGuardWorkers()
         o.onConsole = state.onConsole
         o.screenLocked = state.screenLocked
         o.displayAsleep = state.displayAsleep
@@ -171,6 +184,7 @@ extension WindowServer {
         let app = AXElement.application(pid: pid, timeout: 1)
         var parts: [String] = []
         var visited = 0
+        // Recursive, but depth < 8 and 200 visits bound it to eight frames of a few locals.
         func walk(_ e: AXElement, depth: Int) {
             guard depth < 8, visited < 200 else { return }
             visited += 1

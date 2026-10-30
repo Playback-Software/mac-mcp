@@ -28,15 +28,6 @@ func localPortOpen(_ port: UInt16) -> Bool {
     }
 }
 
-/// Submissions the fixture server logged since `since`.
-func webLog(since: Date) -> [[String: Any]] {
-    let path = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appendingPathComponent("../../baseline/state/web.log").path
-    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
-    return text.split(separator: "\n").compactMap { line in
-        (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
-    }.filter { ($0["t"] as? Double ?? 0) >= since.timeIntervalSince1970 - 1 }
-}
-
 /// The fixture server is on 127.0.0.1, which the default policy refuses as a private address.
 func withFixtureHost(_ body: () throws -> Void) throws {
     try withPolicy(#"{"web": {"allow_hosts": ["127.0.0.1"]}}"#, body)
@@ -51,9 +42,20 @@ extension Integration {
 @Suite struct WebTests {
     init() { _ = webFixtures }
 
-    @Test func fillAndSubmitAFormWithVerifiedTyping() throws {
+    /// Safari's navigate_to_url replies in the format of the last page read, so a markdown read must not cost the
+    /// next navigation its uids.
+    @Test func navigationKeepsUIDsAfterAMarkdownRead() throws {
         try withFixtureHost {
-            let started = Date()
+            #expect(!(try agent().call("web_navigate", ["url": "http://127.0.0.1:8899/form.html"])).isError)
+            let markdown = try agent().call("web_read", ["as": "markdown"])
+            #expect(!markdown.isError && markdown.text.contains("Pizza Order") && !markdown.text.contains("uid="), "\(markdown.text)")
+            let page = try agent().call("web_navigate", ["url": "http://127.0.0.1:8899/confirm.html"])
+            #expect(page.text.contains("uid="), "\(page.text)")
+        }
+    }
+
+    @Test func fillAndSubmitAFormWithVerifiedTyping() throws {
+        try withPolicy(#"{"web": {"eval_allowed": true, "allow_hosts": ["127.0.0.1"]}}"#) {
             let page = try agent().call("web_navigate", ["url": "http://127.0.0.1:8899/form.html"])
             #expect(!page.isError, "\(page.text)")
             let name = try #require(uid("custname", in: page.text)), tel = try #require(uid("custtel", in: page.text))
@@ -65,8 +67,11 @@ extension Integration {
             #expect(!filled.isError && filled.text.contains("did 3 of 3"), "\(filled.text)")
             let sent = try agent().call("web_act", ["actions": [["do": "click", "find": "Submit order"]]])
             #expect(sent.text.contains("/submit"), "\(sent.text)")
-            let submits = webLog(since: started).filter { $0["kind"] as? String == "submit" }
-            let fields = try #require(submits.last?["fields"] as? [String: [String]])
+            // What the server received, as its reply page echoes it (JSON in a <pre>). Not baseline/state/web.log: the
+            // server on 8899 may have been started from another checkout, and then it logs there.
+            let received = try agent().call("web_eval", ["expression": "return JSON.parse(document.querySelector('pre').textContent)"])
+            let result = unmarked(received.text).replacing("Result:", with: "")
+            let fields = try #require(try? JSONSerialization.jsonObject(with: Data(result.utf8)) as? [String: [String]], "\(received.text)")
             #expect(fields["custname"] == ["Grace Hopper"] && fields["custtel"] == ["555-0199"] && fields["size"] == ["large"])
         }
     }

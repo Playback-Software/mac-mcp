@@ -32,31 +32,79 @@ public struct AXElement: @unchecked Sendable, Hashable {
 
     // MARK: Reading
 
-    /// Reads several attributes in one round trip. Missing or unsupported attributes come back as nil.
-    public func read(_ names: [String]) -> [String: Any]? {
+    /// Reads several attributes in one round trip. Missing or unsupported attributes come back as nil, as do ones
+    /// whose read failed; `read(reporting:)` tells those apart.
+    public func read(_ names: [String]) -> [String: Any]? { read(reporting: names)?.values }
+
+    /// A batched read that also says which attributes failed to read, and how: an error other than "unsupported" or
+    /// "no value", which the value alone can't tell from an absent one. A label or identifier that failed to read is
+    /// unknown, not empty. The error is kept because `kAXErrorFailure` is what some apps answer for attributes they
+    /// don't have, and the walker re-reads those once before believing them.
+    public struct Read {
+        public var values: [String: Any]
+        /// The attributes whose read failed, by error. Absent attributes (`absent`) aren't in it.
+        public var errors: [String: AXError]
+        public var failed: Set<String> { Set(errors.keys) }
+        public init(values: [String: Any], errors: [String: AXError] = [:]) {
+            self.values = values
+            self.errors = errors
+        }
+    }
+
+    public func read(reporting names: [String]) -> Read? {
         var values: CFArray?
         let err = AXUIElementCopyMultipleAttributeValues(raw, names as CFArray, AXCopyMultipleAttributeOptions(rawValue: 0), &values)
         guard err == .success, let array = values as [AnyObject]? else { return nil }
-        var result: [String: Any] = [:]
+        var result = Read(values: [:])
         for (name, value) in zip(names, array) {
-            if let v = AXElement.unwrap(value) { result[name] = v }
+            if let v = AXElement.unwrap(value) { result.values[name] = v }
+            else if let error = AXElement.failure(in: value) { result.errors[name] = error }
         }
         return result
     }
 
-    public func attribute(_ name: String) -> Any? {
+    public func attribute(_ name: String) -> Any? { attribute(reporting: name).value }
+
+    /// One attribute, and the error if its read failed rather than finding nothing (see `Read`): nil for a value
+    /// read or an absent attribute.
+    public func attribute(reporting name: String) -> (value: Any?, error: AXError?) {
         var value: AnyObject?
-        guard AXUIElementCopyAttributeValue(raw, name as CFString, &value) == .success else { return nil }
-        return AXElement.unwrap(value)
+        let err = AXUIElementCopyAttributeValue(raw, name as CFString, &value)
+        guard err == .success else { return (nil, Self.absent.contains(err) ? nil : err) }
+        return (AXElement.unwrap(value), nil)
     }
 
-    public func element(_ name: String) -> AXElement? {
-        guard let v = attribute(name), CFGetTypeID(v as CFTypeRef) == AXUIElementGetTypeID() else { return nil }
-        return AXElement(v as! AXUIElement)
+    public func element(_ name: String) -> AXElement? { attribute(name).flatMap(AXElement.from) }
+
+    /// The element an attribute value holds, if it is one.
+    public static func from(_ value: Any) -> AXElement? {
+        guard CFGetTypeID(value as CFTypeRef) == AXUIElementGetTypeID() else { return nil }
+        return AXElement(value as! AXUIElement)
     }
 
-    public func elements(_ name: String) -> [AXElement] {
-        (attribute(name) as? [AXUIElement])?.map(AXElement.init) ?? []
+    /// Errors that mean an attribute has nothing to deliver, as opposed to a read that failed.
+    static let absent: Set<AXError> = [.attributeUnsupported, .noValue, .notImplemented, .parameterizedAttributeUnsupported]
+
+    /// Whether a value from a batched read is a per-attribute error other than an absent attribute.
+    static func isFailure(_ value: AnyObject?) -> Bool { failure(in: value) != nil }
+
+    /// The per-attribute error a value from a batched read carries, unless it means the attribute is absent.
+    static func failure(in value: AnyObject?) -> AXError? {
+        guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        let axValue = value as! AXValue
+        guard AXValueGetType(axValue) == .axError else { return nil }
+        var error = AXError.success
+        guard AXValueGetValue(axValue, .axError, &error), !absent.contains(error) else { return nil }
+        return error
+    }
+
+    public func elements(_ name: String) -> [AXElement] { elements(reporting: name).elements }
+
+    /// The elements an attribute holds, and the error if the read failed (see `attribute(reporting:)`): a failed
+    /// read of a list's rows is a hole in the tree, not an empty list.
+    public func elements(reporting name: String) -> (elements: [AXElement], error: AXError?) {
+        let read = attribute(reporting: name)
+        return ((read.value as? [AXUIElement])?.map(AXElement.init) ?? [], read.error)
     }
 
     public func string(_ name: String) -> String? { attribute(name) as? String }
@@ -107,7 +155,7 @@ public struct AXElement: @unchecked Sendable, Hashable {
 
     // MARK: Values
 
-    /// Converts AXValue-wrapped geometry to Foundation types and drops per-attribute errors.
+    /// Converts AXValue-wrapped geometry to Foundation types and drops per-attribute errors (`isFailure` keeps them).
     static func unwrap(_ value: AnyObject?) -> Any? {
         guard let value else { return nil }
         guard CFGetTypeID(value) == AXValueGetTypeID() else { return value }

@@ -19,6 +19,18 @@ public struct RawNode: Sendable {
     public var expanded: Bool?
     /// Index path from the snapshot root ("0.3.1"); part of the ref fingerprint.
     public var path: String = ""
+    /// The title was borrowed from the text element beside it (`Snapshot.associateLabels`): the element itself is unnamed.
+    public var labelFromNeighbor = false
+    /// The walk couldn't vouch for this node's label and identifier: one of its label sources (title, description,
+    /// value, identifier, title element) failed to read, a descendant failed to read, or the walk was cut short
+    /// inside its subtree. Labels come from descendants too (a row's cells, a button's text), so an empty or
+    /// missing one from such a node is unknown, not proof that it is unnamed.
+    public var identityUncertain = false
+    /// The walk couldn't vouch for this node's searchable text: a label source, a value that is shown, or children
+    /// that could hold text failed to read, or the walk was cut short inside its subtree. A query that matches
+    /// nothing here may still be on screen. A failed identifier alone leaves this false: it names the element to
+    /// an action (`identityUncertain`), but a wait on text doesn't depend on it.
+    public var textUncertain = false
     public var children: [RawNode] = []
 
     public init(role: String, subrole: String? = nil, title: String? = nil, description: String? = nil,
@@ -31,6 +43,39 @@ public struct RawNode: Sendable {
         self.placeholder = placeholder
         self.identifier = identifier
         self.frame = frame
+    }
+}
+
+extension RawNode {
+    /// A copy of the tree with `transform` applied to each node, parents before children. `transform` returns whether
+    /// to go on into the children it leaves in the node. Iterative: trees reach the walker's 60-level limit, and
+    /// a recursive pass would put that many frames on a small cooperative-pool or GCD thread stack.
+    func mapped(_ transform: (inout RawNode) -> Bool) -> RawNode {
+        struct Frame {
+            var node: RawNode
+            var source: [RawNode]
+            var next = 0
+        }
+        func open(_ original: RawNode) -> Frame {
+            var node = original
+            guard transform(&node) else { return Frame(node: node, source: []) }
+            let source = node.children
+            node.children = []
+            node.children.reserveCapacity(source.count)
+            return Frame(node: node, source: source)
+        }
+        var stack = [open(self)]
+        while true {
+            let top = stack.count - 1
+            if stack[top].next < stack[top].source.count {
+                stack[top].next += 1
+                stack.append(open(stack[top].source[stack[top].next - 1]))
+                continue
+            }
+            let finished = stack.removeLast().node
+            guard let parent = stack.indices.last else { return finished }
+            stack[parent].node.children.append(finished)
+        }
     }
 }
 
@@ -55,6 +100,12 @@ public struct Row: Sendable, Equatable {
     public var refScope: AXElement? = nil
     /// Full sanitized text for queries. Presentation remains compact.
     public var searchText: String? = nil
+    /// The developer's AXIdentifier (not printed); with the label, what an action re-checks before using a ref.
+    public var identifier: String? = nil
+    /// The label came from the text beside the control, not from the control (see `RawNode.labelFromNeighbor`).
+    public var labelFromNeighbor: Bool = false
+    /// The label or identifier may be missing because the read failed or was cut (see `RawNode.identityUncertain`).
+    public var identityUncertain: Bool = false
 
     public func matches(_ query: String) -> Bool {
         (searchText ?? [label, value].compactMap { $0 }.joined(separator: "\n"))
@@ -117,6 +168,11 @@ public enum Snapshot {
     /// Roles whose AXValue is a state, not a label.
     static let stateValueRoles: Set<String> = ["AXCheckBox", "AXRadioButton", "AXDisclosureTriangle"]
     static let textEntryRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox"]
+    /// Roles whose AXValue is a state or an entry's contents, never a label: for every other role the value can
+    /// name the element itself (`label`) or an ancestor (`descendantText`), and so a failed read of it is a failed
+    /// read of a label.
+    static let valueNeverLabels: Set<String> = ["AXCheckBox", "AXRadioButton", "AXDisclosureTriangle", "AXTextArea", "AXComboBox",
+                                                "AXPopUpButton", "AXSlider", "AXIncrementor"]
 
     /// Large parts of a window that accessibility describes as nothing: an element covering at least a quarter of
     /// the window, with no interactive element and no text inside it (a canvas, a remote desktop, a game, a
@@ -125,16 +181,21 @@ public enum Snapshot {
         guard let window = root.frame, window.width * window.height > 0 else { return [] }
         let minArea = window.width * window.height / 4
         var found: [CGRect] = []
-        func hasContent(_ n: RawNode) -> Bool {
-            isInteractive(n) || !(n.title ?? n.value ?? n.description ?? "").isEmpty || n.children.contains(where: hasContent)
-        }
-        func visit(_ n: RawNode) {
-            if let f = n.frame?.intersection(window), !f.isNull, f.width * f.height >= minArea, n.role != "AXWindow" {
-                if !hasContent(n) { found.append(f); return }
+        func hasContent(_ root: RawNode) -> Bool {
+            var pending = [root]
+            while let n = pending.popLast() {
+                if isInteractive(n) || !(n.title ?? n.value ?? n.description ?? "").isEmpty { return true }
+                pending += n.children
             }
-            n.children.forEach(visit)
+            return false
         }
-        visit(root)
+        var pending = [root]
+        while let n = pending.popLast() {
+            if let f = n.frame?.intersection(window), !f.isNull, f.width * f.height >= minArea, n.role != "AXWindow" {
+                if !hasContent(n) { found.append(f); continue }
+            }
+            pending += n.children.reversed()   // preorder: the first child is popped first
+        }
         return found.sorted { $0.width * $0.height > $1.width * $1.height }
     }
 
@@ -161,20 +222,19 @@ public enum Snapshot {
 
     /// Remove secure values before any labels, fingerprints, search metadata or debug output are derived.
     static func sanitized(_ node: RawNode) -> RawNode {
-        var n = node
-        if n.subrole == "AXSecureTextField" {
+        node.mapped { n in
+            guard n.subrole == "AXSecureTextField" else { return true }
             n.value = (n.value?.isEmpty == false) ? "•••" : nil
             n.children = []
-        } else {
-            n.children = n.children.map(sanitized)
+            return false
         }
-        return n
     }
 
     /// Concatenated visible text under a node (for unlabeled buttons, links, headings and table rows).
     static func descendantText(_ n: RawNode, separator: String = " ", limit: Int = 160) -> String? {
         var parts: [String] = []
         var images: [String] = []   // icon descriptions ("trash", "letter A icon") only when there is no text
+        // Recursive, but depth < 6 stops it at seven frames, each of a few locals.
         func visit(_ node: RawNode, depth: Int) {
             guard node.subrole != "AXSecureTextField" else { return }
             guard depth < 6, parts.joined(separator: separator).count < limit else { return }
@@ -258,7 +318,18 @@ public enum Snapshot {
         func searchable(_ n: RawNode) -> String {
             [label(n, limit: Int.max), displayValue(n, limit: Int.max)].compactMap { $0 }.joined(separator: "\n")
         }
-        func visit(_ n: RawNode, depth: Int, isRoot: Bool = false, inheritedScope: AXElement? = nil) {
+        // Iterative, in document order: a task emits its own rows when popped, then pushes its children in reverse.
+        enum Task {
+            case visit(RawNode, depth: Int, isRoot: Bool, inheritedScope: AXElement?)
+            case visitInteractiveOnly(RawNode, depth: Int, rowLabel: String?, inheritedScope: AXElement?)
+            /// After a wrapper row's children: its selection moves to the first row that replaced it.
+            case keepSelection(from: Int)
+        }
+        var tasks: [Task] = [.visit(root, depth: 0, isRoot: true, inheritedScope: nil)]
+        func push(_ children: [RawNode], _ task: (RawNode) -> Task) {
+            for c in children.reversed() { tasks.append(task(c)) }
+        }
+        func visit(_ n: RawNode, depth: Int, isRoot: Bool, inheritedScope: AXElement?) {
             let refScope = scope(n, inherited: inheritedScope)
             // Scroll bars are noise for agents (scrolling is mac_scroll's job); title-bar text repeats the window title.
             if n.role == "AXScrollBar" { return }
@@ -266,10 +337,8 @@ public enum Snapshot {
             let interactive = isInteractive(n)
             // An unlabeled row is just a wrapper (System Settings' sidebar): show what's inside it, or nothing.
             if n.role == "AXRow", label(n).isEmpty {
-                let before = rows.count
-                for c in n.children { visitInteractiveOnly(c, depth: depth, rowLabel: nil, inheritedScope: refScope) }
-                // Keep the row's selection (which settings pane is open) on what replaced it.
-                if n.selected, rows.count > before, !rows[before].states.contains("selected") { rows[before].states.append("selected") }
+                if n.selected { tasks.append(.keepSelection(from: rows.count)) }
+                push(n.children) { .visitInteractiveOnly($0, depth: depth, rowLabel: nil, inheritedScope: refScope) }
                 return
             }
             if interactive {
@@ -277,10 +346,11 @@ public enum Snapshot {
                 rows.append(Row(kind: .interactive, role: shortRole(n.role, subrole: n.subrole), label: label,
                                 value: displayValue(n), states: states(n), frame: n.frame, depth: depth, ref: nil,
                                 fingerprint: fingerprint(n, pid: pid, label: label), element: n.element,
-                                refScope: refScope, searchText: searchable(n)))
+                                refScope: refScope, searchText: searchable(n), identifier: n.identifier, labelFromNeighbor: n.labelFromNeighbor,
+                                identityUncertain: n.identityUncertain))
                 // Rows and links summarize their text; still surface interactive descendants (buttons in a row),
                 // except text fields that only repeat the row's own text (Finder's inline rename fields).
-                for c in n.children { visitInteractiveOnly(c, depth: depth + 1, rowLabel: n.role == "AXRow" ? label : nil, inheritedScope: refScope) }
+                push(n.children) { .visitInteractiveOnly($0, depth: depth + 1, rowLabel: n.role == "AXRow" ? label : nil, inheritedScope: refScope) }
                 return
             }
             if includeText, n.role == "AXStaticText" || n.role == "AXHeading" {
@@ -299,7 +369,7 @@ public enum Snapshot {
                                 value: nil, states: [], frame: n.frame, depth: depth, ref: nil, fingerprint: ""))
                 childDepth += 1
             }
-            for c in n.children { visit(c, depth: childDepth, inheritedScope: refScope) }
+            push(n.children) { .visit($0, depth: childDepth, isRoot: false, inheritedScope: refScope) }
         }
         func visitInteractiveOnly(_ n: RawNode, depth: Int, rowLabel: String?, inheritedScope: AXElement?) {
             let refScope = scope(n, inherited: inheritedScope)
@@ -310,19 +380,28 @@ public enum Snapshot {
                 rows.append(Row(kind: .interactive, role: shortRole(n.role, subrole: n.subrole), label: label,
                                 value: displayValue(n), states: states(n), frame: n.frame, depth: depth, ref: nil,
                                 fingerprint: fingerprint(n, pid: pid, label: label), element: n.element,
-                                refScope: refScope, searchText: searchable(n)))
+                                refScope: refScope, searchText: searchable(n), identifier: n.identifier, labelFromNeighbor: n.labelFromNeighbor,
+                                identityUncertain: n.identityUncertain))
             }
-            for c in n.children { visitInteractiveOnly(c, depth: depth, rowLabel: rowLabel, inheritedScope: refScope) }
+            push(n.children) { .visitInteractiveOnly($0, depth: depth, rowLabel: rowLabel, inheritedScope: refScope) }
         }
-        visit(root, depth: 0, isRoot: true)
+        while let task = tasks.popLast() {
+            switch task {
+            case let .visit(n, depth, isRoot, inheritedScope): visit(n, depth: depth, isRoot: isRoot, inheritedScope: inheritedScope)
+            case let .visitInteractiveOnly(n, depth, rowLabel, inheritedScope):
+                visitInteractiveOnly(n, depth: depth, rowLabel: rowLabel, inheritedScope: inheritedScope)
+            case let .keepSelection(before):
+                if rows.count > before, !rows[before].states.contains("selected") { rows[before].states.append("selected") }
+            }
+        }
         return rows
     }
 
     /// Debug view: every walked node with its raw attributes, indented by depth.
     public static func rawDump(_ root: RawNode, maxLines: Int = 400) -> String {
         var lines: [String] = []
-        func visit(_ n: RawNode, _ depth: Int) {
-            guard lines.count < maxLines else { return }
+        var pending = [(node: sanitized(root), depth: 0)]
+        while let (n, depth) = pending.popLast(), lines.count < maxLines {
             var parts = [n.role + (n.subrole.map { "/" + $0 } ?? "")]
             for (k, v) in [("title", n.title), ("desc", n.description), ("value", n.value), ("placeholder", n.placeholder),
                            ("id", n.identifier), ("help", n.help)] {
@@ -330,16 +409,18 @@ public enum Snapshot {
             }
             if let f = n.frame { parts.append("@\(f.minX.safeInt),\(f.minY.safeInt) \(f.width.safeInt)x\(f.height.safeInt)") }
             lines.append(String(repeating: " ", count: min(depth, 20)) + parts.joined(separator: " "))
-            for c in n.children { visit(c, depth + 1) }
+            for c in n.children.reversed() { pending.append((c, depth + 1)) }
         }
-        visit(sanitized(root), 0)
         return lines.joined(separator: "\n")
     }
 
     /// Form layouts often put a field's label in a separate text element just to its left ("Size  [Small ▾]") with
     /// no accessibility link. Give unlabeled controls that text as their title, and drop the now-redundant text node.
     static func associateLabels(_ node: RawNode) -> RawNode {
-        var n = node
+        node.mapped { associateLabels(amongChildrenOf: &$0); return true }
+    }
+
+    private static func associateLabels(amongChildrenOf n: inout RawNode) {
         var consumed = Set<Int>()
         for i in n.children.indices where i > 0 {
             let c = n.children[i], prev = n.children[i - 1]
@@ -350,13 +431,13 @@ public enum Snapshot {
             let unlabeled = label(c).isEmpty || (textEntryRoles.contains(c.role) && clean(c.title) == nil && clean(c.description) == nil)
             if unlabeled {
                 n.children[i].title = name
+                n.children[i].labelFromNeighbor = true
                 consumed.insert(i - 1)
             } else if clean(c.title) == name || clean(c.description) == name {
                 consumed.insert(i - 1)   // already labeled by it (AXTitleUIElement): don't repeat the text
             }
         }
-        n.children = n.children.enumerated().filter { !consumed.contains($0.offset) }.map { associateLabels($0.element) }
-        return n
+        n.children = n.children.enumerated().filter { !consumed.contains($0.offset) }.map(\.element)
     }
 
     /// Renders rows within a token budget (~4 characters per token). Returns the text and how many rows were cut.

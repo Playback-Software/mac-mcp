@@ -39,6 +39,14 @@ public struct RelaySession {
     /// Client lines waiting for the agent to come back.
     public private(set) var held: [Data] = []
 
+    public private(set) var failure: String?
+    public private(set) var reconnectDeadline: TimeInterval?
+    private let reconnectWindow: TimeInterval
+    private let maxQueuedBytes: Int
+    private let maxRequests: Int
+    private var heldBytes = 0
+    private var negotiatedVersion: String?
+    private var inFlightBatches: [String: UUID] = [:]
     private var initialize: [String: Any]?
     private var initializeID: String?
     private var handshakeDone = false
@@ -46,22 +54,34 @@ public struct RelaySession {
     private var replayID: String?
     private var replays = 0
 
-    public init() {}
+    public init(reconnectWindow: TimeInterval = 15, maxQueuedBytes: Int = StreamIO.queueLimit, maxRequests: Int = 256) {
+        self.reconnectWindow = reconnectWindow
+        self.maxQueuedBytes = maxQueuedBytes
+        self.maxRequests = maxRequests
+    }
 
     // MARK: events
 
     /// A line the client wrote to stdin.
     public mutating func fromClient(_ line: Data) -> Output {
+        // The relay owns these labels. A client may never inject a new preamble, including during reconnect.
+        if line.starts(with: Data("#mac-mcp".utf8)) { return Output() }
+        if let failure { return errors(for: [line], message: failure) }
+        guard line.count <= StreamIO.frameLimit else {
+            failure = "MacMCP relay frame exceeds 16 MiB."
+            return errors(for: [line], message: failure!)
+        }
         var out = Output()
         switch phase {
         case .connected:
             send(line, into: &out)
-        case .reconnecting:
-            // A response answers a request from the agent that's gone; the new one never asked.
+        case .reconnecting, .replaying:
             if case .response = Message(line) { break }
+            guard held.count < maxRequests, line.count <= maxQueuedBytes - heldBytes else {
+                return errors(for: [line], message: "MacMCP relay reconnect queue limit exceeded.")
+            }
             held.append(line)
-        case .replaying:
-            held.append(line)
+            heldBytes += line.count
         }
         return out
     }
@@ -69,32 +89,49 @@ public struct RelaySession {
     /// A line the agent wrote to the socket.
     public mutating func fromAgent(_ line: Data) -> Output {
         var out = Output()
-        guard case .response(let id, let isResult) = Message(line) else {
-            out.toClient.append(line)
-            return out
+        for message in Message.messages(line) {
+            guard case .response(let id, let isResult) = message else { continue }
+            if phase == .replaying, id == replayID {
+                let object = Message.object(line)
+                let result = object?["result"] as? [String: Any]
+                guard isResult, object?["error"] == nil,
+                      let version = result?["protocolVersion"] as? String, version == negotiatedVersion else {
+                    let reason = "MacMCP agent replayed initialize failed or negotiated an incompatible protocol version. Reconnect the MCP client."
+                    failure = reason
+                    return giveUp(reason: reason)
+                }
+                replayID = nil
+                phase = .connected
+                reconnectDeadline = nil
+                if let initialized { out.toAgent.append(initialized) }
+                let waiting = held
+                held = []
+                heldBytes = 0
+                for line in waiting { send(line, into: &out) }
+                return out
+            }
+            inFlight.removeAll { $0 == id }
+            inFlightBatches[id] = nil
+            if id == initializeID, isResult, Message.object(line)?["error"] == nil,
+               let result = Message.object(line)?["result"] as? [String: Any],
+               let version = result["protocolVersion"] as? String {
+                handshakeDone = true
+                negotiatedVersion = version
+            }
         }
-        if phase == .replaying, id == replayID {
-            // Our replayed handshake: the client already has its own initialize result.
-            replayID = nil
-            phase = .connected
-            if let initialized { out.toAgent.append(initialized) }
-            for line in held { send(line, into: &out) }
-            held = []
-            return out
-        }
-        inFlight.removeAll { $0 == id }
-        if id == initializeID, isResult { handshakeDone = true }
         out.toClient.append(line)
         return out
     }
 
     /// The agent connection closed. Every request it hadn't answered is answered with an error now, so the
     /// client isn't left waiting; held messages stay held for the next connection.
-    public mutating func agentLost() -> Output {
+    public mutating func agentLost(now: TimeInterval = StreamIO.now) -> Output {
+        if reconnectDeadline == nil { reconnectDeadline = now + reconnectWindow }
         phase = .reconnecting
         replayID = nil
-        let out = Output(toClient: inFlight.map { Self.errorResponse(id: $0, message: Self.lostMessage) })
+        let out = pendingErrors(message: Self.lostMessage)
         inFlight = []
+        inFlightBatches = [:]
         return out
     }
 
@@ -114,41 +151,99 @@ public struct RelaySession {
             }
         }
         phase = .connected
-        for line in held { send(line, into: &out) }
+        reconnectDeadline = nil
+        let waiting = held
         held = []
+        heldBytes = 0
+        for line in waiting { send(line, into: &out) }
         return out
     }
 
     /// The agent isn't coming back: answer everything still outstanding.
     public mutating func giveUp(reason: String) -> Output {
-        var ids = inFlight
-        for line in held {
-            if case .request(let id, _) = Message(line), let id { ids.append(id) }
-        }
+        var out = pendingErrors(message: reason)
+        let waiting = errors(for: held, message: reason)
+        out.toClient += waiting.toClient
         inFlight = []
+        inFlightBatches = [:]
         held = []
-        return Output(toClient: ids.map { Self.errorResponse(id: $0, message: reason) })
+        heldBytes = 0
+        return out
+    }
+
+    /// One monotonic deadline covers connecting and replay; progress never extends it.
+    public mutating func expire(now: TimeInterval = StreamIO.now) -> Output {
+        guard let reconnectDeadline, now >= reconnectDeadline else { return Output() }
+        let reason = "The MacMCP agent did not reconnect and complete initialize within \(Int(reconnectWindow)) s."
+        failure = reason
+        return giveUp(reason: reason)
     }
 
     // MARK: helpers
 
     private mutating func send(_ line: Data, into out: inout Output) {
-        switch Message(line) {
-        case .request(let id, let method):
-            if let id { inFlight.append(id) }
-            if method == "initialize", let object = Message.object(line) {
-                initialize = object
-                initializeID = id
-                handshakeDone = false
+        let messages = Message.messages(line)
+        let ids = messages.compactMap { message -> String? in
+            if case .request(let id, _) = message { return id }
+            return nil
+        }
+        let bytes = inFlight.reduce(0) { $0 + $1.utf8.count }
+        let incoming = ids.reduce(0) { $0 + $1.utf8.count }
+        guard ids.count <= maxRequests - inFlight.count, incoming <= maxQueuedBytes - bytes else {
+            out.toClient += errors(for: [line], message: "MacMCP relay outstanding request limit exceeded (\(maxRequests)).").toClient
+            return
+        }
+        let group = Message.isBatch(line) ? UUID() : nil
+        for message in messages {
+            switch message {
+            case .request(let id, let method):
+                if let id { inFlight.append(id); inFlightBatches[id] = group }
+                if method == "initialize", let object = Message.object(line) {
+                    initialize = object
+                    initializeID = id
+                    handshakeDone = false
+                }
+            case .notification(let method, let cancelled):
+                if method == "notifications/initialized" { initialized = line }
+                if let cancelled {
+                    inFlight.removeAll { $0 == cancelled }
+                    inFlightBatches[cancelled] = nil
+                }
+            case .response, .other: break
             }
-        case .notification(let method, let cancelled):
-            if method == "notifications/initialized" { initialized = line }
-            // The agent won't answer a cancelled request.
-            if let cancelled { inFlight.removeAll { $0 == cancelled } }
-        case .response, .other:
-            break
         }
         out.toAgent.append(line)
+    }
+
+    private func pendingErrors(message: String) -> Output {
+        var sent: Set<UUID> = []
+        var lines: [Data] = []
+        for id in inFlight {
+            if let group = inFlightBatches[id] {
+                guard sent.insert(group).inserted else { continue }
+                let errors = inFlight.filter { inFlightBatches[$0] == group }.map { Self.errorResponse(id: $0, message: message) }
+                lines.append(Self.batch(errors))
+            } else { lines.append(Self.errorResponse(id: id, message: message)) }
+        }
+        return Output(toClient: lines)
+    }
+
+    private func errors(for lines: [Data], message: String) -> Output {
+        Output(toClient: lines.flatMap { line -> [Data] in
+            let responses = Message.messages(line).compactMap { item -> Data? in
+                guard case .request(let id?, _) = item else { return nil }
+                return Self.errorResponse(id: id, message: message)
+            }
+            if responses.isEmpty { return [] }
+            return Message.isBatch(line) ? [Self.batch(responses)] : responses
+        })
+    }
+
+    private static func batch(_ responses: [Data]) -> Data {
+        Data("[".utf8) + responses.enumerated().reduce(into: Data()) { data, item in
+            if item.offset > 0 { data.append(0x2C) }
+            data.append(item.element)
+        } + Data("]".utf8)
     }
 
     /// The JSON text of a JSON-RPC id, used as its identity so `7` and `"7"` stay distinct and round-trip.
@@ -171,7 +266,7 @@ private enum Message {
     case request(id: String?, method: String)  // id is nil only for an unusable id (null, object)
     case notification(method: String, cancelled: String?)
     case response(id: String, isResult: Bool)
-    case other  // not a JSON object (a batch, garbage): passed through untracked
+    case other  // not a JSON-RPC object: passed through untracked
 
     init(_ line: Data) {
         guard let object = Self.object(line) else { self = .other; return }
@@ -191,6 +286,18 @@ private enum Message {
         }
     }
 
+    static func messages(_ line: Data) -> [Message] {
+        guard let array = (try? JSONSerialization.jsonObject(with: line)) as? [Any] else { return [Message(line)] }
+        return array.compactMap { value in
+            guard let data = try? JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]) else { return nil }
+            return Message(data)
+        }
+    }
+
+    static func isBatch(_ line: Data) -> Bool {
+        line.first(where: { ![0x20, 0x09, 0x0D].contains($0) }) == 0x5B
+    }
+
     static func object(_ line: Data) -> [String: Any]? {
         (try? JSONSerialization.jsonObject(with: line)) as? [String: Any]
     }
@@ -199,18 +306,30 @@ private enum Message {
 /// Splits a byte stream into lines (without the newline). Blank lines are dropped.
 public struct LineBuffer {
     private var pending = Data()
-    public init() {}
+    public private(set) var exceededLimit = false
+    public let maxBytes: Int
+    public init(maxBytes: Int = StreamIO.frameLimit) { self.maxBytes = maxBytes }
 
     public mutating func append(_ bytes: some Collection<UInt8>) -> [Data] {
-        pending.append(contentsOf: bytes)
+        guard !exceededLimit else { return [] }
         var lines: [Data] = []
-        while let newline = pending.firstIndex(of: 0x0A) {
-            let line = pending[pending.startIndex..<newline]
-            pending.removeSubrange(pending.startIndex...newline)
-            if line.contains(where: { $0 != 0x20 && $0 != 0x0D && $0 != 0x09 }) { lines.append(Data(line)) }
+        var rest = bytes[...]
+        while !rest.isEmpty {
+            let end = rest.firstIndex(of: 0x0A) ?? rest.endIndex
+            let part = rest[..<end]
+            guard part.count <= maxBytes - pending.count else {
+                exceededLimit = true
+                pending = Data()
+                return []
+            }
+            pending.append(contentsOf: part)
+            guard end != rest.endIndex else { break }
+            if pending.contains(where: { $0 != 0x20 && $0 != 0x0D && $0 != 0x09 }) { lines.append(pending) }
+            pending = Data()
+            rest = rest[rest.index(after: end)...]
         }
         return lines
     }
 
-    public mutating func reset() { pending = Data() }
+    public mutating func reset() { pending = Data(); exceededLimit = false }
 }

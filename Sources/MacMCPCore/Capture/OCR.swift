@@ -5,6 +5,7 @@ import Vision
 /// Text recognition on screenshots, for UI that accessibility can't see: canvases, remote desktops, games, custom-drawn
 /// controls. Each line comes with its box in the screenshot's pixels, so the screenshot id maps it back to the screen.
 public enum OCR {
+    private static let threads = DedicatedThreads(name: "ocr", count: 2)
     public struct Line: Sendable, Equatable {
         public let text: String
         public let confidence: Float
@@ -16,7 +17,7 @@ public enum OCR {
     /// Loads the accurate recognizer ahead of the first real request. Its first use on a machine compiles a model
     /// (measured: 61 s on this M1, once, then cached system-wide until an OS update); later loads take ~0.1 s.
     public static func warmUp() {
-        DispatchQueue.global(qos: .utility).async {
+        threads.async {
             let started = Date()
             let blank = CGContext(data: nil, width: 64, height: 32, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)
@@ -30,10 +31,10 @@ public enum OCR {
     }
 
     /// Recognized lines in reading order (top to bottom, then left to right). Vision blocks while it works, so it
-    /// runs on a GCD thread rather than the cooperative pool.
+    /// runs on two dedicated native threads.
     public static func recognize(png: Data, accurate: Bool = true) async throws -> [Line] {
         try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
+            threads.async {
                 continuation.resume(with: Result { try recognizeBlocking(png: png, accurate: accurate) })
             }
         }

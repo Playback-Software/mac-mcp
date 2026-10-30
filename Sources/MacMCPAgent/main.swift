@@ -12,6 +12,14 @@ import MacMCPServer
 // not kill the agent with SIGPIPE.
 signal(SIGPIPE, SIG_IGN)
 
+// The signed agent executable doubles as the disposable OSA host. Exit before requesting permissions,
+// touching the socket or starting any GUI/session services.
+if CommandLine.arguments.dropFirst().first == ScriptHost.argument {
+    exit(ScriptHost.main())
+}
+
+_ = Scripts.hostExecutable
+
 let audit = AuditLog()
 
 let server = MacMCPServer.definition(audit: audit)
@@ -79,7 +87,7 @@ Watchdog().start { reason in
         await Alerts.shared.notify(.agent, "MacMCP agent stalled (\(reason)) and restarted itself; see \(samplePath).")
         sent.signal()
     }
-    _ = sent.wait(timeout: .now() + 5)   // the pool may be the thing that's stuck
+    _ = sent.wait(timeout: .now() + 5)   // lint:allow-blocking the watchdog's own thread; the pool may be what's stuck
     exit(70)
 }
 

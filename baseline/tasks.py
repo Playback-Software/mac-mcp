@@ -7,14 +7,22 @@ run never relies on the agent's own claim of success where it can be avoided.
 
 from __future__ import annotations
 
+import base64
+import calendar
+import ctypes
+import fcntl
+import hashlib
 import json
 import os
 import plistlib
 import re
 import shutil
 import subprocess
+import tempfile
+import threading
 import time
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -44,6 +52,12 @@ def kill(*apps: str) -> None:
 def fresh_workdir() -> None:
     shutil.rmtree(WORK, ignore_errors=True)
     WORK.mkdir(parents=True)
+    # A path typed into a Save panel's name field is saved as a name, with "/" shown as ":", in whatever folder the
+    # panel was in (usually ~/Documents). Such a leftover, e.g. ":Users:me:Desktop:agent-test-2:note.txt", shows up in
+    # later runs' Save panels and reads to the agent as the task's file already existing.
+    for stray in (HOME / "Documents").glob("*" + WORK.name + ":*"):
+        if stray.is_file():
+            stray.unlink()
 
 
 def gui_job_start(label: str, argv: list[str]) -> None:
@@ -595,21 +609,222 @@ def notes_script(source: str) -> str:
         return direct.stdout.strip()
     if "(-1728)" in direct.stderr or "(-1719)" in direct.stderr:   # allowed, but nothing matched: not an access problem
         return ""
-    saved = POLICY.read_bytes() if POLICY.exists() else None
-    policy = json.loads(saved or b"{}")
-    policy.setdefault("script", {}).setdefault("allowed_apps", [])
-    policy["script"]["allowed_apps"] = sorted(set(policy["script"]["allowed_apps"]) | {"com.apple.Notes"})
-    POLICY.write_text(json.dumps(policy, indent=2))
-    try:
+    def allow_notes(policy):
+        policy.setdefault("script", {}).setdefault("allowed_apps", [])
+        policy["script"]["allowed_apps"] = sorted(set(policy["script"]["allowed_apps"]) | {"com.apple.Notes"})
+        return policy
+
+    with temporary_policy(allow_notes):
         return mac_mcp("mac_script", {"source": source})
-    finally:
-        if saved is None:
-            POLICY.unlink(missing_ok=True)
-        else:
-            POLICY.write_bytes(saved)
 
 
 POLICY = HOME / ".config/mac-mcp/policy.json"
+APPROVED_POLICY = HOME / "Library/Application Support/MacMCP/policy.approved.json"
+APPROVAL_SERVICE = "com.playbacksoftware.macmcp.policy-approval"
+_POLICY_LOCK = threading.RLock()
+_policy_depth = 0
+
+
+@contextmanager
+def policy_exclusion():
+    """Exclude other harness processes across backup, approval and restoration; Notes may nest inside a suite."""
+    global _policy_depth
+    with _POLICY_LOCK:
+        STATE.mkdir(parents=True, exist_ok=True)
+        fd = None
+        if _policy_depth == 0:
+            fd = os.open(STATE / "policy.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BaseException:
+                os.close(fd)
+                raise RuntimeError("another eval harness is changing policy; try again after it finishes")
+        _policy_depth += 1
+        try:
+            yield
+        finally:
+            _policy_depth -= 1
+            if fd is not None:
+                os.close(fd)
+
+
+def policy_command(cli, command, *args):
+    result = subprocess.run([str(cli), "policy", command, *args], capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(f"policy {command} failed (unapproved changes must be reviewed first): "
+                           f"{result.stderr.strip() or result.stdout.strip()}")
+    return result.stdout
+
+
+def approve_exactly(cli, data):
+    """Write policy.json and approve those bytes only: `--expect-sha256` refuses an edit made after the write (by the
+    agent under evaluation, say), and both records are read back afterwards."""
+    write_policy(data)
+    policy_command(cli, "approve", "--expect-sha256", hashlib.sha256(data).hexdigest())
+    if POLICY.read_bytes() != data or keychain_approval()[1] != data:
+        raise RuntimeError("policy.json or its approval changed while the harness approved it")
+
+
+def keychain_records():
+    """Every approval record as (account, bytes, keychain modification time): attributes only, as ApprovalKeychain.swift
+    reads them. Never touches an item: each record is an item of its own, and only MacMCP's CLI adds or deletes them."""
+    cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    sec = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
+    ptr = ctypes.c_void_p
+    signatures = {
+        "CFDictionaryCreateMutable": (ptr, [ptr, ctypes.c_long, ptr, ptr]),
+        "CFDictionarySetValue": (None, [ptr, ptr, ptr]),
+        "CFDictionaryGetValue": (ptr, [ptr, ptr]),
+        "CFStringCreateWithCString": (ptr, [ptr, ctypes.c_char_p, ctypes.c_uint32]),
+        "CFStringGetCString": (ctypes.c_bool, [ptr, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]),
+        "CFArrayGetCount": (ctypes.c_long, [ptr]),
+        "CFArrayGetValueAtIndex": (ptr, [ptr, ctypes.c_long]),
+        "CFDataGetLength": (ctypes.c_long, [ptr]),
+        "CFDataGetBytePtr": (ptr, [ptr]),
+        "CFDateGetAbsoluteTime": (ctypes.c_double, [ptr]),
+        "CFGetTypeID": (ctypes.c_ulong, [ptr]),
+        "CFArrayGetTypeID": (ctypes.c_ulong, []),
+        "CFDataGetTypeID": (ctypes.c_ulong, []),
+        "CFStringGetTypeID": (ctypes.c_ulong, []),
+        "CFDateGetTypeID": (ctypes.c_ulong, []),
+        "CFRelease": (None, [ptr]),
+    }
+    for name, (restype, argtypes) in signatures.items():
+        function = getattr(cf, name)
+        function.restype, function.argtypes = restype, argtypes
+    sec.SecItemCopyMatching.argtypes = [ptr, ctypes.POINTER(ptr)]
+    sec.SecItemCopyMatching.restype = ctypes.c_int32
+    owned = []
+
+    def constant(name, library=sec):
+        return ptr.in_dll(library, name).value
+
+    def string(value):
+        value = cf.CFStringCreateWithCString(None, value.encode(), 0x08000100)
+        owned.append(value)
+        return value
+
+    def typed(value, type_id):
+        return value if value and cf.CFGetTypeID(value) == type_id else None
+
+    query = cf.CFDictionaryCreateMutable(None, 0, None, None)
+    owned.append(query)
+    for key, value in [("kSecClass", constant("kSecClassGenericPassword")), ("kSecAttrService", string(APPROVAL_SERVICE)),
+                       ("kSecUseAuthenticationUI", constant("kSecUseAuthenticationUIFail")),
+                       ("kSecReturnAttributes", constant("kCFBooleanTrue", cf)), ("kSecMatchLimit", constant("kSecMatchLimitAll"))]:
+        cf.CFDictionarySetValue(query, constant(key), value)
+    try:
+        result = ptr()
+        status = sec.SecItemCopyMatching(query, ctypes.byref(result))
+        if status == -25300:   # errSecItemNotFound
+            return []
+        if status != 0:
+            raise RuntimeError(f"cannot read the keychain approval (OSStatus {status}); left policy unchanged")
+        owned.append(result.value)
+        items = typed(result.value, cf.CFArrayGetTypeID())
+        records = []
+        for index in range(cf.CFArrayGetCount(items) if items else 0):
+            item = cf.CFArrayGetValueAtIndex(items, index)
+            account = typed(cf.CFDictionaryGetValue(item, constant("kSecAttrAccount")), cf.CFStringGetTypeID())
+            buffer = ctypes.create_string_buffer(1024)
+            name = buffer.value.decode() if account and cf.CFStringGetCString(account, buffer, 1024, 0x08000100) else ""
+            data = typed(cf.CFDictionaryGetValue(item, constant("kSecAttrGeneric")), cf.CFDataGetTypeID())
+            record = ctypes.string_at(cf.CFDataGetBytePtr(data), cf.CFDataGetLength(data)) if data else b""
+            date = typed(cf.CFDictionaryGetValue(item, constant("kSecAttrModificationDate")), cf.CFDateGetTypeID())
+            records.append((name, record, cf.CFDateGetAbsoluteTime(date) if date else None))
+        return records
+    finally:
+        for value in reversed(owned):
+            if value:
+                cf.CFRelease(value)
+
+
+def keychain_approval():
+    """The record in force and its policy: sequence, person, millisecond, then deterministic record contents.
+    A record that can't be read and may be newer (by the sequence in its account or, without one, by when the keychain
+    last changed it) means the approved policy isn't known, which stops the harness."""
+    readable, damaged = [], []
+    for account, record, modified in keychain_records():
+        try:
+            decoded = json.loads(record)
+            if decoded.get("format") != 1:
+                raise ValueError("unsupported format")
+            approved = base64.b64decode(decoded["policy"], validate=True)
+            if not isinstance(json.loads(approved), dict):
+                raise ValueError("not a policy")
+            milliseconds = decoded.get("approved_at_ms")
+            if milliseconds is None:   # records from before 0.1.1 have whole seconds
+                milliseconds = calendar.timegm(time.strptime(decoded["approved_at"], "%Y-%m-%dT%H:%M:%SZ")) * 1000
+            author, person = decoded["by"], decoded.get("by_person", False)
+            if not isinstance(author, str) or not isinstance(person, bool):
+                raise ValueError("invalid author")
+            order = (decoded.get("sequence", 0), person, milliseconds, decoded["format"], author.encode(), approved)
+            readable.append((order, modified, record, approved))
+        except (ValueError, KeyError, TypeError):
+            damaged.append((account, modified))
+    if not readable:
+        raise RuntimeError("no readable keychain approval; left policy unchanged")
+    order, newest_modified, record, approved = max(readable, key=lambda entry: entry[0])
+    sequence = order[0]
+    for account, modified in damaged:
+        parts = account.split(".")
+        named = int(parts[1]) if len(parts) == 3 and parts[0] == "approval" and parts[1].isdigit() else None
+        # Modification time only orders damaged legacy/unrecognized accounts; equality may be newest.
+        if (named >= sequence) if named is not None else (modified is None or newest_modified is None or modified >= newest_modified):
+            raise RuntimeError("the newest keychain approval record is damaged; run `mac-mcp policy approve`; left policy unchanged")
+    return record, approved
+
+
+def write_policy(data):
+    POLICY.parent.mkdir(parents=True, exist_ok=True)
+    fd, path = tempfile.mkstemp(prefix=".eval-policy-", dir=POLICY.parent)
+    try:
+        with os.fdopen(fd, "wb") as file:
+            file.write(data)
+        os.replace(path, POLICY)
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+@contextmanager
+def temporary_policy(transform, cli=MAC_MCP):
+    """Keep both records durably, refuse pending changes, and restore approval before the original user file. The
+    keychain record in force is backed up for recovery; restoring approves its policy again, as a new record."""
+    with policy_exclusion():
+        status = policy_command(cli, "status")
+        if "in force: the managed policy," in status:
+            raise RuntimeError("eval policy overrides cannot be used with a managed policy")
+        saved = POLICY.read_bytes() if POLICY.exists() else None
+        record, approved = keychain_approval()
+        backup = Path(tempfile.mkdtemp(prefix="policy-backup-", dir=STATE))
+        (backup / "approval.json").write_bytes(record)
+        (backup / "approved-policy.json").write_bytes(approved)
+        (backup / "manifest.json").write_text(json.dumps({"user_file_existed": saved is not None}))
+        if saved is not None:
+            (backup / "policy.json").write_bytes(saved)
+        # Missing policy.json means the keychain policy, never {} (which might be broader).
+        changed = False
+        try:
+            candidate = transform(json.loads(saved if saved is not None else approved))
+            changed = True
+            approve_exactly(cli, json.dumps(candidate, indent=2).encode())
+            yield
+        finally:
+            try:
+                if changed:
+                    # Approve the saved approved bytes again, so the record in force carries them and an agent polling
+                    # during restoration cannot reapprove the eval file (approve_exactly reads them back). Only then
+                    # may the original file (or its absence) return.
+                    approve_exactly(cli, approved)
+                    APPROVED_POLICY.write_bytes(approved)
+                    if saved is None:
+                        POLICY.unlink(missing_ok=True)
+                    else:
+                        write_policy(saved)
+            except BaseException as error:
+                raise RuntimeError(f"policy restoration failed; backups kept at {backup}: {error}") from error
+            else:
+                shutil.rmtree(backup)
 
 
 def l7_delete_note():

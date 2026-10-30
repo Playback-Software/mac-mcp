@@ -73,17 +73,20 @@ public struct Screenshot: Sendable {
     public let subject: String
 }
 
+/// Screenshot ids (`c3`) and the mappings behind them. Ids come from `IDBlocks`, so they never repeat across agent
+/// restarts: a client's `c3` from before a restart must not map through a screenshot someone else took after it.
 public actor ScreenshotStore {
-    public static let shared = ScreenshotStore()
+    public static let shared = ScreenshotStore(ids: .shared)
     private var mappings: [String: ScreenshotMapping] = [:]
     private var order: [String] = []
-    private var next = 1
+    private var ids: IDCounter
 
-    public init() {}
+    public init(ids: IDBlocks = .ephemeral) { self.ids = IDCounter(prefix: "c", blocks: ids, blockSize: 100) }
 
-    public func record(_ mapping: ScreenshotMapping) -> String {
-        let id = "c\(next)"
-        next += 1
+    /// Throws when a block of ids can't be recorded on disk (`IDBlocksError`).
+    public func record(_ mapping: ScreenshotMapping) async throws -> String {
+        while ids.blockNeeded() { ids.add(try await ids.reserveBlock()) }
+        let id = ids.mint()
         mappings[id] = mapping
         order.append(id)
         if order.count > 50 { mappings[order.removeFirst()] = nil }
@@ -91,6 +94,14 @@ public actor ScreenshotStore {
     }
 
     public func mapping(_ id: String) -> ScreenshotMapping? { mappings[id] }
+
+    /// Why an id has no mapping: taken before the agent restarted, expired, or never issued.
+    public func missingMessage(_ id: String) -> String {
+        if ids.isFromEarlierIncarnation(id) {
+            return "Screenshot \(id) is from before the agent restarted. Take a new mac_screenshot."
+        }
+        return "Unknown screenshot_id \(id). Screenshot ids expire; take a new mac_screenshot."
+    }
 }
 
 public enum CaptureError: Error, CustomStringConvertible {
@@ -150,7 +161,7 @@ public enum Capture {
             filter = SCContentFilter(desktopIndependentWindow: window)
             source = window.frame
             captured = .init(id: window.windowID, frame: window.frame)
-            subject = "\(app.name) window \"\(window.title ?? "")\""
+            subject = "\(app.name) window \(Untrusted.inline(window.title ?? ""))"   // the title is the app's own text
         } else {
             let displays = Displays.all()
             let center = req.region.map { CGPoint(x: $0.midX, y: $0.midY) }
@@ -221,7 +232,7 @@ public enum Capture {
             throw CaptureError.failed("PNG encoding")
         }
         let mapping = ScreenshotMapping(source: source, pixelSize: CGSize(width: image.width, height: image.height), window: captured)
-        let id = await store.record(mapping)
+        let id = try await store.record(mapping)
         return Screenshot(id: id, png: png, mapping: mapping, subject: subject)
     }
 }

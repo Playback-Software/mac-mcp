@@ -3,14 +3,27 @@ import Foundation
 /// What changed between two snapshots of the same UI. Refs are stable, so interactive elements are compared by
 /// ref (appeared, disappeared, changed label/value/state); text has no identity and is compared as lines.
 public enum Diff {
+    public struct Result: Sendable, Equatable {
+        public var lines: [String]
+        /// Refs that appear in `lines` (so the agent has now seen their current label).
+        public var refs: [String]
+    }
+
     public static func lines(before: [Row], after: [Row], maxLines: Int = 30) -> [String] {
+        compute(before: before, after: after, maxLines: maxLines).lines
+    }
+
+    /// `showDisappeared` false leaves out the `-` lines: an after-walk that stopped early or failed reads can't tell a
+    /// row that went away from one it never reached.
+    public static func compute(before: [Row], after: [Row], maxLines: Int = 30, showDisappeared: Bool = true) -> Result {
         var out: [String] = []
+        var refs: [String] = []
         let beforeByRef = Dictionary(before.compactMap { r in r.ref.map { ($0, r) } }, uniquingKeysWith: { a, _ in a })
         let afterRefs = Set(after.compactMap(\.ref))
 
         for r in after {
             guard let ref = r.ref else { continue }
-            guard let old = beforeByRef[ref] else { out.append("+ " + flat(r)); continue }
+            guard let old = beforeByRef[ref] else { out.append("+ " + flat(r)); refs.append(ref); continue }
             var changes: [String] = []
             if old.label != r.label { changes.append("label \"\(old.label)\" → \"\(r.label)\"") }
             if old.value != r.value { changes.append("value \"\(old.value ?? "")\" → \"\(r.value ?? "")\"") }
@@ -18,10 +31,12 @@ public enum Diff {
             if !added.isEmpty || !removed.isEmpty {
                 changes.append("states " + (added.map { "+" + $0 } + removed.map { "-" + $0 }).joined(separator: " "))
             }
-            if !changes.isEmpty { out.append("~ \(ref) \(r.role) \"\(r.label)\": " + changes.joined(separator: ", ")) }
+            if !changes.isEmpty { out.append("~ \(ref) \(r.role) \"\(r.label)\": " + changes.joined(separator: ", ")); refs.append(ref) }
         }
-        for r in before where r.ref != nil && !afterRefs.contains(r.ref!) {
-            out.append("- \(r.ref!) \(r.role) \"\(r.label)\"")
+        if showDisappeared {
+            for r in before where r.ref != nil && !afterRefs.contains(r.ref!) {
+                out.append("- \(r.ref!) \(r.role) \"\(r.label)\"")
+            }
         }
 
         // Text and context rows: multiset difference of their rendered lines.
@@ -33,13 +48,14 @@ public enum Diff {
             if let c = counts[line], c > 0 { counts[line] = c - 1 } else { appeared.append(line) }
         }
         out += appeared.map { "+ " + $0 }
-        out += counts.flatMap { line, c in Array(repeating: "- " + line, count: c) }.sorted()
+        if showDisappeared { out += counts.flatMap { line, c in Array(repeating: "- " + line, count: c) }.sorted() }
 
         if out.count > maxLines {
             let extra = out.count - maxLines
             out = Array(out.prefix(maxLines)) + ["… \(extra) more changes (call mac_snapshot for the full state)"]
+            refs = Array(refs.prefix(maxLines))   // ref lines come first, so the cut keeps the first maxLines of them
         }
-        return out
+        return Result(lines: out, refs: refs)
     }
 
     static func flat(_ r: Row) -> String { r.render(frames: false).trimmingCharacters(in: .whitespaces) }

@@ -5,6 +5,8 @@ cd "${0:A:h}/.."
 source "${0:A:h}/toolchain.sh"
 APP="$HOME/Applications/MacMCPTestHost.app"
 swift build --product TestHost
+# A TestHost still running from the old bundle would serve the tests its old fixtures; the next test relaunches it.
+pkill -f "$APP/Contents/MacOS/TestHost" || true
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp .build/debug/TestHost "$APP/Contents/MacOS/TestHost"

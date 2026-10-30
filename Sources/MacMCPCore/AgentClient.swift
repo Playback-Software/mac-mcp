@@ -23,14 +23,11 @@ public final class AgentClient {
     /// Presents `lease` (default: this process's MAC_MCP_LEASE) so its calls may act while that lease is held.
     public convenience init(clientName: String, version: String, path: String = Paths.socket, timeout: TimeInterval = 30,
                             lease: String? = LeaseStore.ownToken) throws {
-        let fd = try UnixSocket.connect(path: path)
-        if let line = AgentClient.directive(lease: lease) {
-            guard line.withUnsafeBytes({ write(fd, $0.baseAddress, line.count) }) == line.count else {
-                close(fd)
-                throw SocketError("write", path: path)
-            }
-        }
-        try self.init(clientName: clientName, version: version, input: fd, output: fd, timeout: timeout)
+        try Self.validate(timeout)
+        let deadline = StreamIO.now + timeout
+        let fd = try UnixSocket.connect(path: path, deadline: deadline)
+        try self.init(clientName: clientName, version: version, input: fd, output: fd, timeout: timeout,
+                      initialDeadline: deadline, preamble: Self.directive(lease: lease))
     }
 
     /// The line a client sends before any JSON-RPC: a GUI lease token (see `Lease`), and for the relay, where the
@@ -72,16 +69,35 @@ public final class AgentClient {
     public static func newSessionID() -> String { String(UUID().uuidString.lowercased().prefix(8)) }
 
     /// Talks MCP over any pair of descriptors (e.g. pipes to a `mac-mcp relay` process), taking ownership of them.
-    public init(clientName: String, version: String, input: Int32, output: Int32, timeout: TimeInterval = 30) throws {
+    public convenience init(clientName: String, version: String, input: Int32, output: Int32, timeout: TimeInterval = 30) throws {
+        try self.init(clientName: clientName, version: version, input: input, output: output, timeout: timeout,
+                      initialDeadline: StreamIO.now + timeout, preamble: nil)
+    }
+
+    private init(clientName: String, version: String, input: Int32, output: Int32, timeout: TimeInterval,
+                 initialDeadline: TimeInterval, preamble: Data?) throws {
         self.input = input
         self.output = output
         self.timeout = timeout
-        // Follow the protocol: wait for the initialize result before sending anything else.
+        try Self.validate(timeout)
+        try StreamIO.configure(input)
+        if output != input { try StreamIO.configure(output) }
+        if let preamble { try StreamIO.writeAll(output, preamble, deadline: initialDeadline) }
         try send(["jsonrpc": "2.0", "id": 1, "method": "initialize",
                   "params": ["protocolVersion": "2025-11-25", "capabilities": [:] as [String: Any],
-                             "clientInfo": ["name": clientName, "version": version]]])
-        _ = try response(id: 1)
-        try send(["jsonrpc": "2.0", "method": "notifications/initialized"])
+                             "clientInfo": ["name": clientName, "version": version]]], deadline: initialDeadline)
+        let result = try response(id: 1, deadline: initialDeadline)
+        guard result["error"] == nil, (result["result"] as? [String: Any])?["protocolVersion"] as? String == "2025-11-25" else {
+            throw SocketError("initialize failed or negotiated an incompatible protocol", path: "agent")
+        }
+        try send(["jsonrpc": "2.0", "method": "notifications/initialized"], deadline: initialDeadline)
+    }
+
+    private static func validate(_ timeout: TimeInterval) throws {
+        guard timeout.isFinite, timeout > 0, timeout <= Double(Int32.max) / 1000 else {
+            errno = EINVAL
+            throw SocketError("timeout must be finite, positive and at most 2147483 seconds", path: "agent")
+        }
     }
 
     deinit {
@@ -92,8 +108,9 @@ public final class AgentClient {
     public func call(_ tool: String, _ arguments: [String: Any] = [:]) throws -> ToolResult {
         let id = nextID
         nextID += 1
-        try send(["jsonrpc": "2.0", "id": id, "method": "tools/call", "params": ["name": tool, "arguments": arguments]])
-        let msg = try response(id: id)
+        let deadline = StreamIO.now + timeout
+        try send(["jsonrpc": "2.0", "id": id, "method": "tools/call", "params": ["name": tool, "arguments": arguments]], deadline: deadline)
+        let msg = try response(id: id, deadline: deadline)
         if let error = msg["error"] as? [String: Any] {
             return ToolResult(content: [["type": "text", "text": "protocol error: \(error["message"] ?? error)"]], isError: true)
         }
@@ -104,32 +121,37 @@ public final class AgentClient {
     public func listTools() throws -> [String] {
         let id = nextID
         nextID += 1
-        try send(["jsonrpc": "2.0", "id": id, "method": "tools/list"])
-        let tools = ((try response(id: id))["result"] as? [String: Any])?["tools"] as? [[String: Any]] ?? []
+        let deadline = StreamIO.now + timeout
+        try send(["jsonrpc": "2.0", "id": id, "method": "tools/list"], deadline: deadline)
+        let tools = ((try response(id: id, deadline: deadline))["result"] as? [String: Any])?["tools"] as? [[String: Any]] ?? []
         return tools.compactMap { $0["name"] as? String }
     }
 
-    private func send(_ message: [String: Any]) throws {
+    private func send(_ message: [String: Any], deadline: TimeInterval) throws {
         var data = try JSONSerialization.data(withJSONObject: message)
         data.append(0x0A)
-        let written = data.withUnsafeBytes { write(output, $0.baseAddress, data.count) }
-        guard written == data.count else { throw SocketError("write", path: Paths.socket) }
+        guard data.count <= StreamIO.frameLimit else { throw SocketError("frame exceeds 16 MiB", path: "agent") }
+        try StreamIO.writeAll(output, data, deadline: deadline)
     }
 
-    /// Reads newline-delimited JSON-RPC messages until the response with `id` arrives.
-    private func response(id: Int) throws -> [String: Any] {
+    /// Reads until the matching response; unrelated messages and trickled bytes consume the same deadline.
+    private func response(id: Int, deadline: TimeInterval) throws -> [String: Any] {
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         while true {
             while let newline = pending.firstIndex(of: 0x0A) {
                 let line = pending[pending.startIndex..<newline]
+                guard line.count <= StreamIO.frameLimit else { throw SocketError("frame exceeds 16 MiB", path: "agent") }
+                guard StreamIO.now < deadline else { errno = ETIMEDOUT; throw SocketError("deadline exceeded", path: "agent") }
                 pending.removeSubrange(pending.startIndex...newline)
                 if let msg = try? JSONSerialization.jsonObject(with: line) as? [String: Any], msg["id"] as? Int == id {
                     return msg
                 }
             }
-            var pfd = pollfd(fd: input, events: Int16(POLLIN), revents: 0)
-            let n = poll(&pfd, 1, Int32(timeout * 1000)) > 0 ? read(input, &buffer, buffer.count) : -1
-            guard n > 0 else { throw SocketError("read (timed out or closed)", path: Paths.socket) }
+            guard pending.count <= StreamIO.frameLimit else { throw SocketError("frame exceeds 16 MiB", path: "agent") }
+            try StreamIO.wait(input, events: Int16(POLLIN), deadline: deadline)
+            let n = read(input, &buffer, buffer.count)
+            if n < 0, errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK { continue }
+            guard n > 0 else { throw SocketError("read (closed)", path: "agent") }
             pending.append(contentsOf: buffer[0..<n])
         }
     }

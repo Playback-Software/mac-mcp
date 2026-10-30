@@ -1,133 +1,97 @@
+import AppKit
+import ApplicationServices
 import CoreGraphics
 import Foundation
 
-/// Synthesized mouse and keyboard input, posted at the HID level (the box is dedicated: taking the real cursor and
-/// keyboard focus is fine). Every key-down gets its key-up with modifiers cleared, so nothing is left held down
-/// (a stuck modifier turns later typing into shortcuts).
+/// Synthesized input. Each sequence owns its cleanup, including when its action is abandoned at a deadline.
 public enum Input {
     public enum Button: String, Sendable, CaseIterable { case left, right, middle }
-
-    // Only used from the serialized action path (ActionLock).
     nonisolated(unsafe) static let source = CGEventSource(stateID: .hidSystemState)
 
-    static let modifierMask: CGEventFlags = [.maskCommand, .maskShift, .maskAlternate, .maskControl, .maskSecondaryFn]
-
-    static func pause(_ ms: Int) { usleep(useconds_t(ms * 1000)) }   // lint:allow-blocking milliseconds between events
-
-    /// An action abandoned at its deadline is cancelled; from then on it may only release what it pressed (key and
-    /// button ups), never start new input that would land in the middle of the next action.
-    static func post(_ event: CGEvent?) {
-        guard let event else { return }
-        let release = [.keyUp, .leftMouseUp, .rightMouseUp, .otherMouseUp].contains(event.type)
-            || (event.type == .flagsChanged && event.flags.intersection(modifierMask).isEmpty)
-        if Task.isCancelled, !release { return }
-        event.post(tap: .cghidEventTap)
-    }
-
-    // MARK: Mouse
-
-    public static func move(to p: CGPoint) {
-        post(CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left))
-        pause(15)
-    }
-
-    public static func click(at p: CGPoint, button: Button = .left, count: Int = 1, modifiers: CGEventFlags = []) {
-        let (down, up, cgButton): (CGEventType, CGEventType, CGMouseButton) = switch button {
-        case .left: (.leftMouseDown, .leftMouseUp, .left)
-        case .right: (.rightMouseDown, .rightMouseUp, .right)
-        case .middle: (.otherMouseDown, .otherMouseUp, .center)
-        }
-        move(to: p)   // many apps need hover state before a click lands
-        for i in 1...max(1, count) {
-            for type in [down, up] {
-                let e = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: p, mouseButton: cgButton)
-                e?.setIntegerValueField(.mouseEventClickState, value: Int64(i))
-                e?.flags = modifiers
-                post(e)
-                pause(type == down ? 30 : 15)
+    /// Revocation closes the race between abandoning an action and it starting another input sequence.
+    final class Session: @unchecked Sendable {
+        private let lock = NSLock()
+        private var revoked = false
+        private var active = 0
+        func begin() throws {
+            try lock.withLock {
+                guard !revoked else { throw CancellationError() }
+                active += 1
             }
         }
-    }
-
-    /// Moves the pointer without clicking and leaves it there (hover). A second small move follows, since some
-    /// apps (web views) only start hover tracking after more than one mouse-moved event.
-    public static func hover(at p: CGPoint) {
-        move(to: CGPoint(x: p.x - 2, y: p.y))
-        move(to: p)
-    }
-
-    /// How a drag is paced. Finder starts a file drag only after a press that's held, then a small move; the Dock
-    /// accepts a drop only after the pointer dwells on its icon.
-    public struct DragTiming: Sendable {
-        public var holdMs = 150      // after mouse-down, before the first move
-        public var steps = 20        // intermediate mouse-dragged events
-        public var dwellMs = 150     // over the target, before mouse-up
-        public var modifiers: CGEventFlags = []
-        public init() {}
-    }
-
-    public static func drag(from a: CGPoint, to b: CGPoint, timing: DragTiming = DragTiming()) {
-        func event(_ type: CGEventType, _ p: CGPoint) {
-            let e = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: p, mouseButton: .left)
-            e?.setIntegerValueField(.mouseEventClickState, value: 1)
-            e?.flags = timing.modifiers
-            post(e)
+        func check() throws {
+            try lock.withLock { if revoked { throw CancellationError() } }
         }
-        move(to: a)
-        event(.leftMouseDown, a)
-        pause(max(0, timing.holdMs))
-        // A few pixels first, so the drag starts at the source rather than wherever the first big step lands.
-        let length = max(1, hypot(b.x - a.x, b.y - a.y))
-        let nudge = CGPoint(x: a.x + (b.x - a.x) / length * 6, y: a.y + (b.y - a.y) / length * 6)
-        event(.leftMouseDragged, nudge)
-        pause(50)
-        let steps = max(1, timing.steps)
-        for i in 1...steps {
-            let t = CGFloat(i) / CGFloat(steps)
-            event(.leftMouseDragged, CGPoint(x: nudge.x + (b.x - nudge.x) * t, y: nudge.y + (b.y - nudge.y) * t))
-            pause(12)
-        }
-        // Small moves over the target while dwelling: drop targets update their highlight on drag events.
-        let dwell = max(0, timing.dwellMs), wiggles = max(1, dwell / 100)
-        for i in 0..<wiggles {
-            event(.leftMouseDragged, CGPoint(x: b.x + (i % 2 == 0 ? 1 : 0), y: b.y))
-            pause(dwell / wiggles)
-        }
-        event(.leftMouseUp, b)
-        pause(30)
+        func end() { lock.withLock { active -= 1 } }
+        func revoke() { lock.withLock { revoked = true } }
+        var drained: Bool { lock.withLock { active == 0 } }
+    }
+    @TaskLocal static var session: Session?
+    @TaskLocal public static var leaseCheck: LeaseStore.InputCheck?
+
+    /// Tests replace both the guard and event sink; they never send input to the desktop.
+    struct Environment: @unchecked Sendable {
+        var check: (pid_t?, Bool) throws -> Void
+        var post: (CGEvent) -> Void
+        var windows: (@Sendable () -> [WindowInfo])? = nil
+        var dragCleanup: (@Sendable (CGPoint, pid_t?) throws -> DragCleanupState)? = nil
+    }
+    @TaskLocal static var environment: Environment?
+
+    static let promptRefusal = "A macOS security or permission prompt is on screen. A person must answer it before input can continue."
+
+    static func promptBlocks(hasPrompts: Bool, targetIsPrompt: Bool, focusIsPrompt: Bool, focusKnown: Bool) -> Bool {
+        hasPrompts || targetIsPrompt || focusIsPrompt
     }
 
-    public enum ScrollUnit: String, Sendable, CaseIterable { case line, pixel }
-
-    /// Scrolls at a point (positive dy scrolls content down, i.e. reveals what's below), by lines like a mouse wheel
-    /// or by pixels as continuous events like a trackpad. Modifiers are held for the whole scroll (cmd/ctrl-wheel
-    /// zoom, shift-wheel, option-wheel).
-    public static func scroll(at p: CGPoint, dx: Int = 0, dy: Int, unit: ScrollUnit = .line, modifiers: CGEventFlags = []) {
-        move(to: p)
-        if !modifiers.isEmpty { setModifiers(modifiers) }
-        // Several small events scroll more reliably than one big one.
-        let total = abs(dy) + abs(dx)
-        let steps = max(1, min(unit == .line ? total : total / 10, 40))
-        let ys = shares(dy, steps: steps), xs = shares(dx, steps: steps)
-        for i in 0..<steps {
-            let e = CGEvent(scrollWheelEvent2Source: source, units: unit == .line ? .line : .pixel, wheelCount: 2,
-                            wheel1: ys[i], wheel2: xs[i], wheel3: 0)
-            if unit == .pixel { e?.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1) }
-            e?.flags = modifiers
-            post(e)
-            pause(12)
+    static func keyboardRefusal(target: pid_t, exists: Bool, frontmost: pid_t?, focused: pid_t?, focusName: String?) -> String? {
+        guard exists else { return "The target app quit. Open it and take a new mac_snapshot before sending keys." }
+        guard frontmost == target else { return "The target app is no longer frontmost. Activate it and retry." }
+        if let focused, focused != target {
+            return "Keyboard focus is held by \(focusName ?? "another process"). Dismiss it or focus the target app and retry."
         }
-        if !modifiers.isEmpty { setModifiers([]) }
+        return nil
     }
 
-    /// Splits a scroll distance over `steps` events so they add up to exactly `d` (the remainder goes to the first
-    /// events), as wheel deltas: positive `d` reveals content below or to the right, which is a negative delta.
-    static func shares(_ d: Int, steps: Int) -> [Int32] {
-        let base = abs(d) / steps, extra = abs(d) % steps, sign = d > 0 ? -1 : 1
-        return (0..<steps).map { Int32(clamping: sign * (base + ($0 < extra ? 1 : 0))) }
+    static func check(pid: pid_t?, keyboard: Bool = false, point: CGPoint? = nil,
+                      validate: @escaping @Sendable () throws -> Void = {}, route: ActionRoute.Step? = nil) async throws {
+        try Task.checkCancellation()
+        try session?.check()
+        let environment = environment, leaseCheck = leaseCheck, inputSession = session
+        try await guardWork {
+            do { try leaseCheck?.check() }
+            catch { inputSession?.revoke(); throw error }
+            let windows = environment.map { $0.windows?() ?? [] } ?? WindowServer.onScreenWindows()
+            try $guardWindows.withValue(windows) {
+                if let environment { try environment.check(pid, keyboard) }
+                else { try checkBlocking(pid: pid, keyboard: keyboard, windows: windows) }
+                try validate()
+            }
+        }
+        if let route { try await ActionRoute.validate(route) }
+        else if let point { try await ActionRoute.validate(.target(nil, point: point, pid: pid, opens: false)) }
+        if ActionRoute.check != nil, route != nil || point != nil {
+            try await check(pid: pid, keyboard: keyboard, validate: validate)
+        }
+        try Task.checkCancellation()
+        try session?.check()
     }
 
-    /// Posts a flags-changed event, for apps that read the current modifier state rather than the event's flags.
+    static func sequence(_ body: () async throws -> Void) async throws {
+        try Task.checkCancellation()
+        try session?.begin()
+        defer { session?.end() }
+        try await body()
+    }
+
+    static func pause(_ ms: Int) async throws { try await Task.sleep(for: .milliseconds(max(0, ms))) }
+
+    /// Only cleanup bypasses the guard, and only for a down this sequence actually posted.
+    static func post(_ event: CGEvent?) {
+        guard let event else { return }
+        if let environment { environment.post(event) } else { event.post(tap: .cghidEventTap) }
+    }
+
     static func setModifiers(_ flags: CGEventFlags) {
         let e = CGEvent(source: source)
         e?.type = .flagsChanged
@@ -135,33 +99,190 @@ public enum Input {
         post(e)
     }
 
-    // MARK: Keyboard
-
-    /// Types arbitrary text as Unicode, independent of keyboard layout. Newlines become Return, tabs Tab.
-    public static func type(_ text: String) {
-        var buffer = ""
-        func flush() {
-            for chunk in unicodeChunks(buffer) {
-                for down in [true, false] {
-                    let e = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)
-                    e?.flags = []
-                    chunk.withUnsafeBufferPointer { e?.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: $0.baseAddress) }
-                    post(e)
-                }
-                pause(8)
-            }
-            buffer = ""
+    public static func move(to p: CGPoint, pid: pid_t? = nil) async throws {
+        try await sequence {
+            try await check(pid: pid, point: p)
+            post(CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left))
+            try await pause(15)
         }
-        for ch in text {
-            if ch == "\n" || ch == "\r\n" { flush(); press(KeySpec(key: 36, flags: [])) }
-            else if ch == "\t" { flush(); press(KeySpec(key: 48, flags: [])) }
-            else { buffer.append(ch) }
-        }
-        flush()
     }
 
-    /// Text as keyboard-event payloads of at most 20 UTF-16 units (the practical limit per event), split only between
-    /// characters: half a surrogate pair or emoji sequence arrives as garbage. A longer single character goes alone.
+    public static func click(at p: CGPoint, button: Button = .left, count: Int = 1, modifiers: CGEventFlags = [], pid: pid_t? = nil) async throws {
+        try await sequence {
+            let (down, up, cgButton): (CGEventType, CGEventType, CGMouseButton) = switch button {
+            case .left: (.leftMouseDown, .leftMouseUp, .left)
+            case .right: (.rightMouseDown, .rightMouseUp, .right)
+            case .middle: (.otherMouseDown, .otherMouseUp, .center)
+            }
+            try await move(to: p, pid: pid)
+            var pressedModifiers = false
+            defer { if pressedModifiers { setModifiers([]) } }
+            for i in 1...max(1, count) {
+                try await check(pid: pid, point: p, route: .target(nil, point: p, pid: pid, opens: count >= 2))
+                let e = CGEvent(mouseEventSource: source, mouseType: down, mouseCursorPosition: p, mouseButton: cgButton)
+                guard let e else { continue }
+                e.setIntegerValueField(.mouseEventClickState, value: Int64(i))
+                e.flags = modifiers
+                post(e)
+                pressedModifiers = !modifiers.isEmpty
+                do {
+                    defer {
+                        e.type = up
+                        e.flags = Task.isCancelled ? [] : modifiers
+                        post(e)
+                    }
+                    try await pause(30)
+                }
+                try await pause(15)
+            }
+        }
+    }
+
+    public static func hover(at p: CGPoint, pid: pid_t? = nil) async throws {
+        try await sequence {
+            try await move(to: CGPoint(x: p.x - 2, y: p.y), pid: pid)
+            try await move(to: p, pid: pid)
+        }
+    }
+
+    public struct DragTiming: Sendable {
+        public var holdMs = 150
+        public var steps = 20
+        public var dwellMs = 150
+        public var modifiers: CGEventFlags = []
+        public init() {}
+    }
+
+    public static func drag(from a: CGPoint, to b: CGPoint, timing: DragTiming = DragTiming(), pid: pid_t? = nil,
+                            validate: @escaping @Sendable () throws -> Void = {}) async throws {
+        try await sequence {
+            guard let mouse = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: a, mouseButton: .left) else {
+                throw ActionError("Could not create mouse input. Check mac_doctor and retry.")
+            }
+            func event(_ type: CGEventType, _ p: CGPoint, cleanup: Bool = false) {
+                mouse.type = type
+                mouse.location = p
+                mouse.setIntegerValueField(.mouseEventClickState, value: 1)
+                mouse.flags = cleanup ? [] : timing.modifiers
+                post(mouse)
+            }
+            try await move(to: a, pid: pid)
+            try await check(pid: pid, point: a, validate: validate, route: .drag(from: a, to: b, pid: pid, modifiers: timing.modifiers))
+            event(.leftMouseDown, a)
+            defer { if !timing.modifiers.isEmpty { setModifiers([]) } }
+            do {
+                try await pause(timing.holdMs)
+                let length = max(1, hypot(b.x - a.x, b.y - a.y))
+                let nudge = CGPoint(x: a.x + (b.x - a.x) / length * 6, y: a.y + (b.y - a.y) / length * 6)
+                try await check(pid: pid, point: nudge, validate: validate, route: .drag(from: a, to: b, pid: pid, modifiers: timing.modifiers))
+                event(.leftMouseDragged, nudge)
+                try await pause(50)
+                let steps = max(1, timing.steps)
+                for i in 1...steps {
+                    let t = CGFloat(i) / CGFloat(steps)
+                    let p = CGPoint(x: nudge.x + (b.x - nudge.x) * t, y: nudge.y + (b.y - nudge.y) * t)
+                    try await check(pid: pid, point: p, validate: validate, route: .drag(from: a, to: b, pid: pid, modifiers: timing.modifiers))
+                    event(.leftMouseDragged, p)
+                    try await pause(12)
+                }
+                let dwell = max(0, timing.dwellMs), wiggles = max(1, dwell / 100)
+                for i in 0..<wiggles {
+                    let p = CGPoint(x: b.x + (i % 2 == 0 && i < wiggles - 1 ? 1 : 0), y: b.y)
+                    try await check(pid: pid, point: p, validate: validate, route: .drag(from: a, to: b, pid: pid, modifiers: timing.modifiers))
+                    event(.leftMouseDragged, p)
+                    try await pause(dwell / wiggles)
+                }
+                try await check(pid: pid, point: b, validate: validate, route: .drag(from: a, to: b, pid: pid, modifiers: timing.modifiers))
+                event(.leftMouseUp, b)
+            } catch {
+                let cleanup = await dragCleanup(at: a, pid: pid)
+                if cleanup.escape {
+                    let escape = CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: true)
+                    escape?.flags = []
+                    post(escape)
+                    escape?.type = .keyUp
+                    post(escape)
+                }
+                let release = cleanup.source ? a : cleanup.fallback
+                if cleanup.source || cleanup.fallbackSafe { event(.leftMouseDragged, release, cleanup: true) }
+                event(.leftMouseUp, release, cleanup: true)
+                if !cleanup.source {
+                    let place = cleanup.fallbackSafe ? "over the menu bar" : "outside displays"
+                    log("drag aborted: no verified source drop; released " + place)
+                    throw ActionError("Drag stopped; no safe source drop could be verified. "
+                        + (cleanup.fallbackSafe ? "Released over the menu bar, where nothing takes a drop." : "Released outside all displays to avoid a window drop.")
+                        + " Take mac_snapshot and check the result.", audit: "drag aborted; released " + place)
+                }
+                throw error
+            }
+        }
+    }
+
+    public enum ScrollUnit: String, Sendable, CaseIterable { case line, pixel }
+
+    public static func scroll(at p: CGPoint, dx: Int = 0, dy: Int, unit: ScrollUnit = .line, modifiers: CGEventFlags = [],
+                              pid: pid_t? = nil, validate: @escaping @Sendable () throws -> Void = {}) async throws {
+        try await sequence {
+            try await move(to: p, pid: pid)
+            try await check(pid: pid, point: p, validate: validate)
+            if !modifiers.isEmpty { setModifiers(modifiers) }
+            defer { if !modifiers.isEmpty { setModifiers([]) } }
+            let total = abs(dy) + abs(dx)
+            let steps = max(1, min(unit == .line ? total : total / 10, 40))
+            let ys = shares(dy, steps: steps), xs = shares(dx, steps: steps)
+            for i in 0..<steps {
+                try await check(pid: pid, point: p, validate: validate)
+                let e = CGEvent(scrollWheelEvent2Source: source, units: unit == .line ? .line : .pixel, wheelCount: 2,
+                                wheel1: ys[i], wheel2: xs[i], wheel3: 0)
+                if unit == .pixel { e?.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1) }
+                e?.flags = modifiers
+                post(e)
+                try await pause(12)
+            }
+        }
+    }
+
+    static func shares(_ d: Int, steps: Int) -> [Int32] {
+        let base = abs(d) / steps, extra = abs(d) % steps, sign = d > 0 ? -1 : 1
+        return (0..<steps).map { Int32(clamping: sign * (base + ($0 < extra ? 1 : 0))) }
+    }
+
+    /// `replacing`: ⌘A was just sent to select what the text replaces. A newline or tab in the text is sent as Return or
+    /// Tab, each checked as a key of one call with the text before it (see `OpenRoutes.typedKeys`).
+    public static func type(_ text: String, pid: pid_t? = nil, replacing: Bool = false) async throws {
+        try await sequence {
+            var buffer = ""
+            func flush() async throws {
+                for chunk in unicodeChunks(buffer) {
+                    try await check(pid: pid, keyboard: true, route: .text(String(decoding: chunk, as: UTF16.self), pid: pid))
+                    guard let e = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) else { continue }
+                    e.flags = []
+                    chunk.withUnsafeBufferPointer { e.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: $0.baseAddress) }
+                    post(e)
+                    e.type = .keyUp
+                    post(e)
+                    try await pause(8)
+                }
+                buffer = ""
+            }
+            let keys = OpenRoutes.typedKeys(text, replacing: replacing)
+            var position = replacing ? 1 : 0
+            func control(_ code: CGKeyCode) async throws {
+                try await flush()
+                let sequence = keys.map { ActionRoute.KeySequence(keys: $0, index: position, typed: true) }
+                try await ActionRoute.$keySequence.withValue(sequence) { try await press(KeySpec(key: code, flags: []), pid: pid) }
+            }
+            for ch in text {
+                try Task.checkCancellation()
+                if ch == "\n" || ch == "\r" || ch == "\r\n" { try await control(36) }
+                else if ch == "\t" { try await control(48) }
+                else { buffer.append(ch) }
+                position += 1
+            }
+            try await flush()
+        }
+    }
+
     static func unicodeChunks(_ text: String) -> [[UniChar]] {
         var chunks: [[UniChar]] = [], current: [UniChar] = []
         for ch in text {
@@ -173,20 +294,25 @@ public enum Input {
         return chunks
     }
 
-    public static func press(_ spec: KeySpec, repeat count: Int = 1) {
-        for _ in 0..<max(1, count) {
-            if Task.isCancelled { break }   // a call abandoned at its deadline must not keep typing
-            let down = CGEvent(keyboardEventSource: source, virtualKey: spec.key, keyDown: true)
-            down?.flags = spec.flags
-            post(down)
-            pause(25)
-            let up = CGEvent(keyboardEventSource: source, virtualKey: spec.key, keyDown: false)
-            up?.flags = spec.flags
-            post(up)
-            pause(25)
+    public static func press(_ spec: KeySpec, repeat count: Int = 1, pid: pid_t? = nil) async throws {
+        try await sequence {
+            for _ in 0..<max(1, count) {
+                try await check(pid: pid, keyboard: true, route: .key(spec, pid: pid))
+                guard let e = CGEvent(keyboardEventSource: source, virtualKey: spec.key, keyDown: true) else { continue }
+                e.flags = spec.flags
+                post(e)
+                do {
+                    defer {
+                        e.type = .keyUp
+                        e.flags = []
+                        post(e)
+                        if !spec.flags.isEmpty { setModifiers([]) }
+                    }
+                    try await pause(25)
+                }
+                try await pause(25)
+            }
         }
-        // Release state: a flags-changed event with no modifiers.
-        setModifiers([])
     }
 }
 

@@ -11,18 +11,20 @@ public final class Watchdog: @unchecked Sendable {
         public var interval: TimeInterval = 5
         /// No progress on the main queue or the cooperative pool for this long counts as a stall.
         public var stall: TimeInterval = 60
-        /// The action lock held by one call for this long counts as a stall (deadlines should end it long before).
+        /// Fallback for a holder whose deadline has not yet been published.
         public var lockHeld: TimeInterval = 180
+        /// Grace after the holder's actual deadline for cancellation and lock handoff.
+        public var deadlineMargin: TimeInterval = 15
         public init() {}
     }
 
     /// Why the agent is stalled at `now`, or nil if it's healthy. Times are monotonic (system uptime, which stops
     /// while the Mac sleeps, so waking up doesn't look like a stall).
     public static func stall(now: TimeInterval, lastMain: TimeInterval, lastPool: TimeInterval,
-                             lockHeldFor: TimeInterval?, lockHolder: String?, limits: Limits) -> String? {
+                             lockHeldFor: TimeInterval?, lockHolder: String?, limits: Limits, lockDeadline: TimeInterval? = nil) -> String? {
         if now - lastMain > limits.stall { return "main thread unresponsive for \(Int(now - lastMain)) s" }
         if now - lastPool > limits.stall { return "task pool starved for \(Int(now - lastPool)) s" }
-        if let held = lockHeldFor, held > limits.lockHeld {
+        if let held = lockHeldFor, lockDeadline.map({ now > $0 + limits.deadlineMargin }) ?? (held > limits.lockHeld) {
             return "action lock held by \(lockHolder ?? "?") for \(Int(held)) s"
         }
         return nil
@@ -34,6 +36,7 @@ public final class Watchdog: @unchecked Sendable {
     private var lastPool: TimeInterval
     private var lockHeldFor: TimeInterval?
     private var lockHolder: String?
+    private var lockDeadline: TimeInterval?
 
     public init(limits: Limits = Limits()) {
         self.limits = limits
@@ -61,12 +64,13 @@ public final class Watchdog: @unchecked Sendable {
                         self.lastPool = Watchdog.now
                         self.lockHeldFor = status.heldFor
                         self.lockHolder = status.holder
+                        self.lockDeadline = status.deadline
                     }
                 }
                 guard !late else { continue }
                 let reason = lock.withLock {
                     Watchdog.stall(now: now, lastMain: lastMain, lastPool: lastPool, lockHeldFor: lockHeldFor,
-                                   lockHolder: lockHolder, limits: limits)
+                                   lockHolder: lockHolder, limits: limits, lockDeadline: lockDeadline)
                 }
                 if let reason { onStall(reason) }
             }

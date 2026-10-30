@@ -43,7 +43,7 @@ import Testing
     }
 
     @Test func waitingSucceedsWhenTheHolderLeaves() async {
-        let claims = Claims(idle: 60, maxWait: 5)
+        let claims = Claims(idle: 60, maxWait: 120)   // the holder leaves long before this, however busy the machine is
         _ = await claims.tryBegin("gui", session: "a", client: "x", origin: nil)
         Task { try? await Task.sleep(for: .milliseconds(300)); await claims.release(session: "a") }
         #expect(await claims.begin("gui", session: "b", client: "y", origin: nil) == nil)

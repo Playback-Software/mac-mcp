@@ -19,6 +19,7 @@ import socket
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 
@@ -46,10 +47,26 @@ DISALLOWED = ["mcp__macos__Shell", "mcp__macos__Scrape"]
 # MacMCP's scripting tool is off unless --script (GUI-only runs stay comparable with the baseline).
 NO_SCRIPT = ["mcp__macos__mac_script"]
 SCRIPT_POLICY = {"script": {"allowed_apps": ["com.apple.TextEdit", "com.apple.finder", "com.apple.Safari"], "timeout_seconds": 30}}
-POLICY_FILE = Path.home() / ".config/mac-mcp/policy.json"
 # The policy's own defaults (Policy.defaultDenyApps), for when the file doesn't list deny_apps.
-DEFAULT_DENY = ["com.apple.Terminal", "com.googlecode.iterm2", "com.apple.ScriptEditor2", "com.apple.Automator",
-                "com.apple.shortcuts", "com.apple.keychainaccess", "com.apple.Passwords", "com.apple.systempreferences"]
+DEFAULT_DENY = ["com.apple.Terminal", "com.googlecode.iterm2", "com.mitchellh.ghostty", "dev.warp.Warp-Stable",
+                "dev.warp.Warp-Preview", "dev.warp.WarpOss", "org.alacritty", "io.alacritty", "net.kovidgoyal.kitty",
+                "net.kovidgoyal.kitty-quick-access", "com.github.wez.wezterm", "co.zeit.hyper",
+                "com.apple.ScriptEditor2", "com.apple.Automator", "com.apple.shortcuts", "com.apple.ScriptMenuApp",
+                "com.apple.AppleScriptUtility", "com.latenightsw.ScriptDebugger", "com.latenightsw.ScriptDebugger5",
+                "com.latenightsw.ScriptDebugger6", "com.latenightsw.ScriptDebugger7", "com.latenightsw.ScriptDebugger8",
+                "Script Debugger",
+                "com.apple.Spotlight", "com.raycast.macos", "com.raycast.macos.palette", "com.raycast-x.macos",
+                "com.runningwithcrayons.Alfred", "com.runningwithcrayons.Alfred-Preferences", "com.runningwithcrayons.Alfred-3",
+                "com.runningwithcrayons.Alfred-Preferences-3", "com.runningwithcrayons.Alfred-2",
+                "com.stairways.keyboardmaestro.editor", "com.stairways.keyboardmaestro.engine", "org.hammerspoon.Hammerspoon",
+                "com.apple.keychainaccess", "com.apple.Passwords",
+                "com.1password.1password", "com.1password.safari", "2BUA8C4S2C.com.1password.browser-helper",
+                "com.agilebits.onepassword7", "2BUA8C4S2C.com.agilebits.onepassword7-helper", "com.agilebits.onepassword-osx",
+                "com.agilebits.onepassword4", "com.bitwarden.desktop", "com.bitwarden.beta.desktop", "com.dashlane.Dashlane",
+                "com.dashlane.dashlanephonefinal", "org.keepassxc.keepassxc", "org.keepassx.keepassxc",
+                "com.lastpass.lastpassmacdesktop", "com.lastpass.LastPass", "com.lastpass.lastpassforsafari",
+                "me.proton.pass.electron", "me.proton.pass.catalyst", "in.sinew.Enpass-Desktop.App", "in.sinew.Enpass-Desktop",
+                "com.apple.systempreferences"]
 
 
 def eval_policy(policy: dict, script: bool) -> dict:
@@ -297,9 +314,6 @@ def main() -> None:
     out_dir.mkdir(parents=True)
     (ROOT / "workdir").mkdir(exist_ok=True)
 
-    saved_policy = POLICY_FILE.read_bytes() if POLICY_FILE.exists() else None
-    if args.server == "mac-mcp":
-        POLICY_FILE.write_text(json.dumps(eval_policy(json.loads(saved_policy or b"{}"), args.script), indent=2))
     # A fixture server left over from an interrupted run (or started by hand) would hold the port, and could be
     # running older code: stop whatever listens on it.
     holders = subprocess.run(["lsof", "-t", "-iTCP:8899", "-sTCP:LISTEN"], capture_output=True, text=True).stdout.split()
@@ -308,7 +322,10 @@ def main() -> None:
     time.sleep(0.5)
     web = subprocess.Popen([sys.executable, str(ROOT / "webserver.py")])
     rows = []
+    policies = ExitStack()
     try:
+        if args.server == "mac-mcp":
+            policies.enter_context(suite.temporary_policy(lambda p: eval_policy(p, args.script), cli=MAC_MCP_CLI))
         for run in range(1, args.repeat + 1):
           for task in selected:
             if screen_locked():
@@ -327,10 +344,10 @@ def main() -> None:
         pass
     finally:
         web.terminate()
-        subprocess.run([str(MAC_MCP_CLI), "lease", "release", os.environ["MAC_MCP_LEASE"]], capture_output=True)
-        if args.server == "mac-mcp":
-            if saved_policy is None: POLICY_FILE.unlink(missing_ok=True)
-            else: POLICY_FILE.write_bytes(saved_policy)
+        try:
+            policies.close()   # restore under exclusion before giving up the GUI lease
+        finally:
+            subprocess.run([str(MAC_MCP_CLI), "lease", "release", os.environ["MAC_MCP_LEASE"]], capture_output=True)
 
     lines = ["| Run | Task | Result | Tool calls | Images | Waits | Wall (s) | Tokens in/out | Detail |", "|---|---|---|---|---|---|---|---|---|"]
     for r in rows:

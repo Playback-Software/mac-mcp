@@ -100,25 +100,25 @@ private func node(_ role: String, _ subrole: String? = nil, title: String? = nil
 }
 
 @Suite struct RefStoreTests {
-    @Test func sameElementKeepsItsRefAcrossSnapshots() async {
+    @Test func sameElementKeepsItsRefAcrossSnapshots() async throws {
         let store = RefStore()
         let tree = node("AXWindow", children: [node("AXButton", title: "Save", path: "0"), node("AXButton", title: "Cancel", path: "1")])
         var first = Snapshot.rows(from: tree, pid: 9)
-        let s1 = await store.record(&first, pid: 9)
+        let s1 = try await store.record(&first, pid: 9)
         var second = Snapshot.rows(from: tree, pid: 9)
-        let s2 = await store.record(&second, pid: 9)
+        let s2 = try await store.record(&second, pid: 9)
         #expect(s2 == s1 + 1)
         #expect(first.map(\.ref) == second.map(\.ref))
         #expect(Set(first.compactMap(\.ref)).count == 2)
     }
 
-    @Test func newElementsGetNewRefs() async {
+    @Test func newElementsGetNewRefs() async throws {
         let store = RefStore()
         var a = Snapshot.rows(from: node("AXWindow", children: [node("AXButton", title: "Save", path: "0")]), pid: 9)
-        _ = await store.record(&a, pid: 9)
+        _ = try await store.record(&a, pid: 9)
         var b = Snapshot.rows(from: node("AXWindow", children: [node("AXButton", title: "Save", path: "0"),
                                                                node("AXButton", title: "Don't Save", path: "1")]), pid: 9)
-        _ = await store.record(&b, pid: 9)
+        _ = try await store.record(&b, pid: 9)
         #expect(b[0].ref == a[0].ref)
         #expect(b[1].ref != a[0].ref && b[1].ref != nil)
     }

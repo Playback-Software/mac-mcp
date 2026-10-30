@@ -31,7 +31,7 @@ final class Peer: @unchecked Sendable {
 
     /// The next message from the server, or nil if none arrives within `timeout`. The blocking wait runs on a GCD
     /// thread: tests blocking the cooperative pool would starve the very Connection they're talking to.
-    func next(timeout: TimeInterval = 5) async -> Value? {
+    func next(timeout: TimeInterval = 30) async -> Value? {
         await withCheckedContinuation { c in
             DispatchQueue.global().async { c.resume(returning: self.nextBlocking(timeout: timeout)) }
         }
@@ -70,7 +70,7 @@ func request(_ id: Value, _ method: String, _ params: Value? = nil) -> Value {
 }
 
 /// A server with two tools: `echo` (returns its `text`, optionally repeated) and `block` (waits until cancelled).
-func testServer(cancelled: Probe? = nil) -> ServerDefinition {
+func testServer(cancelled: Probe? = nil, started: Signal? = nil) -> ServerDefinition {
     let echo = Tool(name: "echo", description: "Echo", inputSchema: ["type": "object"], annotations: .init(readOnlyHint: true))
     let block = Tool(name: "block", description: "Block", inputSchema: ["type": "object"], annotations: .init(readOnlyHint: true))
     return ServerDefinition(name: "test", version: "1.0", instructions: "Test server.", tools: [echo, block]) { name, args, session in
@@ -79,6 +79,7 @@ func testServer(cancelled: Probe? = nil) -> ServerDefinition {
             let text = args["text"]?.stringValue ?? ""
             return CallResult(content: [.text(String(repeating: text, count: args["repeat"]?.intValue ?? 1))])
         case "block":
+            started?.fire()
             while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(20)) }
             cancelled?.add("cancelled")
             return CallResult(content: [.text("late")])
@@ -212,7 +213,7 @@ final class Probe: @unchecked Sendable {
         for i in 2...20 { peer.send(request(.int(i), "tools/call", ["name": "echo", "arguments": ["text": "small"]])) }
         var ids: Set<Int> = []
         for _ in 1...20 {
-            let m = try #require(await peer.next(timeout: 10), "a response was lost or corrupted")
+            let m = try #require(await peer.next(timeout: 60), "a response was lost or corrupted")
             ids.insert(try #require(m["id"]?.intValue))
             if m["id"] == 1 {
                 #expect(m["result"]?["content"]?.arrayValue?.first?["text"]?.stringValue?.count == 3_000_000)
@@ -222,26 +223,30 @@ final class Probe: @unchecked Sendable {
     }
 
     @Test func cancelledCallsStopAndGetNoResponse() async throws {
-        let probe = Probe()
-        let peer = try Peer(testServer(cancelled: probe))
+        let probe = Probe(), started = Signal()
+        let peer = try Peer(testServer(cancelled: probe, started: started))
         defer { peer.close() }
         peer.send(request("slow", "tools/call", ["name": "block"]))
-        try await Task.sleep(for: .milliseconds(100))
+        await started.wait()
         peer.send(["jsonrpc": "2.0", "method": "notifications/cancelled", "params": ["requestId": "slow", "reason": "user"]])
         peer.send(request(2, "ping"))
         #expect(await peer.next()?["id"] == 2)   // not the cancelled call
-        #expect(await peer.next(timeout: 0.5) == nil)
+        // Once the call has seen its cancellation and returned, a response to it would be on its way: the next message
+        // must be the answer to a later ping instead.
+        await waitUntil("the call to observe its cancellation") { probe.all == ["cancelled"] }
+        peer.send(request(3, "ping"))
+        #expect(await peer.next()?["id"] == 3)
         #expect(probe.all == ["cancelled"])
     }
 
     @Test func closingTheConnectionCancelsCalls() async throws {
-        let probe = Probe()
-        let peer = try Peer(testServer(cancelled: probe))
+        let probe = Probe(), started = Signal()
+        let peer = try Peer(testServer(cancelled: probe, started: started))
         peer.send(request(1, "tools/call", ["name": "block"]))
-        try await Task.sleep(for: .milliseconds(100))
+        await started.wait()
         peer.close()
         await peer.serving.value
-        try await Task.sleep(for: .milliseconds(100))
+        await waitUntil("the call to observe its cancellation") { probe.all == ["cancelled"] }
         #expect(probe.all == ["cancelled"])
     }
 

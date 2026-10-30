@@ -45,5 +45,6 @@ public struct SigningIdentity: Sendable {
 /// and other non-GUI contexts, where the login keychain, screen capture and GUI control are unavailable.
 public func launchdSessionType() -> String {
     guard let r = try? Subprocess.runBlocking("/bin/launchctl", ["managername"], timeout: 5), !r.timedOut else { return "unknown" }
-    return r.stdout
+    let name = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+    return name.isEmpty ? "unknown" : name
 }

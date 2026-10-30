@@ -1,9 +1,10 @@
 // MacMCP Test Host: a small app with known controls for integration tests.
 //
-// Open macmcp-testhost://sheet, ://alert, ://dismiss or ://reset to change state without any clicks.
+// Open macmcp-testhost://sheet, ://alert, ://dismiss, ://rename or ://reset to change state without any clicks.
 // User-visible state changes are appended to ~/Library/Application Support/MacMCPTestHost/events.jsonl so tests can
 // verify what an action really did.
 import SwiftUI
+import WebKit
 
 @main
 struct TestHostApp: App {
@@ -33,8 +34,12 @@ final class TestModel {
     var mushroom = false
     var size = "Small"
     var status = "Nothing submitted yet."
+    /// macmcp-testhost://rename retitles the Submit button, so a ref taken before reads differently after.
+    var submitTitle = "Submit"
     var showSheet = false
     var showAlert = false
+    var showWeb = false
+    var savePanel: NSSavePanel?
     /// macmcp-testhost://interrupt arms a surprise: just after the first topping is toggled, a "session
     /// expiring" alert appears mid-task. "Sign Out" clears the form; "Stay Signed In" keeps it (eval task L11).
     var interruptArmed = false
@@ -61,15 +66,27 @@ final class TestModel {
         if kind == "menu" { status = "Menu: \(detail)" }
     }
 
-    func open(_ url: URL) {
+    @MainActor func open(_ url: URL) {
+        if openRouteFixture(url) { return }
         switch url.host {
+        case "web": showWeb = true
+        case "save-panel":
+            guard let window = NSApplication.shared.windows.first(where: { $0.title == "MacMCP Test Host" }) else { return }
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "Untitled"
+            savePanel = panel
+            panel.beginSheetModal(for: window) { [weak self] response in
+                self?.record("save-panel", response == .OK ? "save" : "cancel")
+                self?.savePanel = nil
+            }
         case "sheet": showSheet = true
         case "alert": showAlert = true
-        case "dismiss": showSheet = false; showAlert = false; showInterrupt = false
+        case "dismiss": showSheet = false; showAlert = false; showInterrupt = false; showWeb = false; savePanel?.cancel(nil); savePanel = nil; closeRouteWindows()
         case "interrupt": interruptArmed = true
+        case "rename": submitTitle = "Send Order"
         case "reset":
             name = ""; bacon = false; mushroom = false; size = "Small"; status = "Nothing submitted yet."; moveCount = 0
-            password = "hunter2-secret"; scrollToTop += 1; interruptArmed = false; showInterrupt = false
+            password = "hunter2-secret"; scrollToTop += 1; interruptArmed = false; showInterrupt = false; submitTitle = "Submit"
         default: break
         }
         record("url", url.absoluteString)
@@ -115,7 +132,7 @@ struct ContentView: View {
             }
             .onChange(of: model.size) { _, v in model.record("size", v) }
             HStack {
-                Button("Submit") { model.submit() }.keyboardShortcut(.defaultAction)
+                Button(model.submitTitle) { model.submit() }.keyboardShortcut(.defaultAction)
                 Button("Show Sheet") { model.showSheet = true }
                 Button("Show Alert") { model.showAlert = true }
                 Spacer()
@@ -163,6 +180,12 @@ struct ContentView: View {
             }
             .padding(24)
         }
+        .sheet(isPresented: $model.showWeb) {
+            VStack {
+                OverflowWebView().frame(width: 500, height: 400)
+                Button("Close Web Fixture") { model.showWeb = false }
+            }.padding()
+        }
         .alert("Your session is about to expire", isPresented: $model.showInterrupt) {
             Button("Sign Out", role: .destructive) {
                 model.record("interrupt", "sign out")
@@ -177,4 +200,17 @@ struct ContentView: View {
             Button("Delete", role: .destructive) { model.record("alert", "delete") }
         }
     }
+}
+
+/// Local WebKit fixture: nested structural containers with visible overflow must not clip the text field.
+struct OverflowWebView: NSViewRepresentable {
+    func makeNSView(context: Context) -> WKWebView {
+        let view = WKWebView()
+        let wrappers = String(repeating: "<div role='group' style='height:0;overflow:visible'>", count: 24)
+        let end = String(repeating: "</div>", count: 24)
+        view.loadHTMLString("<!doctype html><html><body style='padding:30px'>" + wrappers
+            + "<label>Web name<input aria-label='Web name' type='text'></label>" + end + "</body></html>", baseURL: nil)
+        return view
+    }
+    func updateNSView(_ nsView: WKWebView, context: Context) {}
 }

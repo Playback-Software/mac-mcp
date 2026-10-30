@@ -30,6 +30,7 @@ enum SnapshotTool {
         if let refused = await policyGuard(app) { return refused }
         var req = SnapshotRequest()
         req.pid = app.pid
+        req.markShown = true   // the only snapshot the agent sees as rendered
         if let s = args.string("scope") {
             guard let scope = SnapshotScope(rawValue: s) else {
                 return .error("scope must be one of: \(SnapshotScope.allCases.map(\.rawValue).joined(separator: ", ")).")

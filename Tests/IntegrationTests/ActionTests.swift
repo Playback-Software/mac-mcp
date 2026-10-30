@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import Testing
 import MacMCPCore
@@ -72,7 +73,7 @@ extension Integration {
         let ok = try agent().call("mac_menu", ["app": hostApp, "path": "Test > Say Hello"])
         #expect(!ok.isError && ok.text.contains("+ text \"Menu: Say Hello\""), "\(ok.text)")
         let bad = try agent().call("mac_menu", ["app": hostApp, "path": ["Test", "Nope"]])
-        #expect(bad.isError && bad.text.contains("Available: \"Say Hello\""))
+        #expect(bad.isError && unmarked(bad.text).contains("Available: \"Say Hello\""), "\(bad.text)")
     }
 
     @Test func keyboardShortcut() throws {
@@ -131,10 +132,14 @@ extension Integration {
     }
 
     @Test func pointInAnotherAppIsRefused() throws {
-        // Just right of the host's window: whatever is there (another window, the desktop) isn't the host.
+        // Just beside the host's window: whatever is there (another window, the desktop) isn't the host. Earlier tests
+        // move the window, so take whichever side is still on a display.
         let list = try agent().call("mac_window", ["action": "list", "app": hostApp]).text
         let frame = try #require(list.firstMatch(of: /@(-?\d+),(-?\d+) (\d+)x(\d+)/))
-        let x = Int(frame.1)! + Int(frame.3)! + 150, y = Int(frame.2)! + Int(frame.4)! / 2
+        let y = Int(frame.2)! + Int(frame.4)! / 2
+        let right = Int(frame.1)! + Int(frame.3)! + 150, left = Int(frame.1)! - 150
+        var displays: UInt32 = 0
+        let x = CGGetDisplaysWithPoint(CGPoint(x: right, y: y), 0, nil, &displays) == .success && displays > 0 ? right : left
         let r = try agent().call("mac_click", ["x": x, "y": y, "app": hostApp])
         #expect(r.isError, "\(r.text)")
         #expect(r.text.contains("is covered by"), "\(r.text)")

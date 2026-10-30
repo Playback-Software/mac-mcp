@@ -1,16 +1,33 @@
 import Foundation
 import MacMCPCore
 
+/// Captured before dispatch; modern requests cannot change the identity or lease token of an earlier call.
+public struct RequestContext: Sendable {
+    public let client: String
+    public let protocolVersion: String?
+    public let leaseToken: String?
+    public let origin: String?
+    public let id: String
+    let leasePath: String
+
+    public var leaseHolder: String? {
+        get async {
+            guard let lease = await LeaseStore.currentAsync(path: leasePath), lease.token == leaseToken else { return nil }
+            return lease.holder
+        }
+    }
+}
+
 /// What a connection serves.
 public struct ServerDefinition: Sendable {
     public let name: String
     public let version: String
     public let instructions: String
     public let tools: [Tool]
-    public let call: @Sendable (_ name: String, _ arguments: [String: Value], _ session: Session) async -> CallResult
+    public let call: @Sendable (_ name: String, _ arguments: [String: Value], _ session: RequestContext) async -> CallResult
 
     public init(name: String, version: String, instructions: String, tools: [Tool],
-                call: @escaping @Sendable (String, [String: Value], Session) async -> CallResult) {
+                call: @escaping @Sendable (String, [String: Value], RequestContext) async -> CallResult) {
         self.name = name
         self.version = version
         self.instructions = instructions
@@ -35,23 +52,53 @@ public actor Session {
     public private(set) var protocolVersion: String?
     /// The GUI lease token this connection presented (`#mac-mcp lease=<token>`), if any.
     public private(set) var leaseToken: String?
-    /// Who holds that lease (an eval run, the integration tests), when it was the active lease on presentation.
-    public private(set) var leaseHolder: String?
+    /// Current lease ownership is derived each time; a released or expired token grants no bypass.
+    public var leaseHolder: String? {
+        get async {
+            guard let lease = await LeaseStore.currentAsync(path: leasePath), lease.token == leaseToken else { return nil }
+            return lease.holder
+        }
+    }
     /// `local` or `ssh:<address>`, as the relay reported it; nil for clients that connect without the relay.
     public private(set) var origin: String?
     /// The relay's session id (stable across agent restarts), else one for this connection.
     public private(set) var id = AgentClient.newSessionID()
 
-    public init() {}
+    private let leasePath: String
+    private var labeled = false
+    private var legacyClient = "unknown"
+    private var legacyVersion: String?
+    public init(leasePath: String = LeaseStore.defaultPath) { self.leasePath = leasePath }
 
-    func setClient(_ info: Value?) {
-        guard let info, let name = info["name"]?.stringValue else { return }
-        client = [name, info["version"]?.stringValue].compactMap { $0 }.joined(separator: " ")
+    /// Snapshot before dispatch. Modern requests never inherit the identity of an earlier request.
+    func snapshot(version: String?, info: Value?) -> RequestContext {
+        RequestContext(client: version == nil ? legacyClient : Self.clientLabel(info), protocolVersion: version ?? legacyVersion,
+                leaseToken: leaseToken, origin: origin, id: id, leasePath: leasePath)
+    }
+
+    private static func clientLabel(_ info: Value?) -> String {
+        guard let name = info?["name"]?.stringValue else { return "unknown" }
+        return [name, info?["version"]?.stringValue].compactMap { $0 }.joined(separator: " ")
+    }
+
+    func negotiate(version: String, info: Value?) {
+        legacyClient = Self.clientLabel(info)
+        legacyVersion = version
+        client = legacyClient
+        labeled = true
+        protocolVersion = version
+    }
+
+    func identifyOnce(_ info: Value?) {
+        guard !labeled else { return }
+        client = Self.clientLabel(info)
+        labeled = true
     }
 
     func setProtocolVersion(_ v: String) { protocolVersion = v }
+    var supportsBatches: Bool { legacyVersion == "2025-03-26" }
 
-    /// A `#mac-mcp key=value …` line sent before (or between) JSON-RPC messages.
+    /// A `#mac-mcp key=value …` preamble, accepted only before the first JSON-RPC message.
     func apply(directive line: String) {
         for field in line.dropFirst("#mac-mcp".count).split(separator: " ") {
             let parts = field.split(separator: "=", maxSplits: 1).map(String.init)
@@ -59,7 +106,6 @@ public actor Session {
             switch parts[0] {
             case "lease":
                 leaseToken = parts[1]
-                if let lease = LeaseStore.current(), lease.token == parts[1] { leaseHolder = lease.holder }
             case "origin": origin = parts[1]
             case "session": id = parts[1]
             default: break
@@ -100,90 +146,164 @@ public final class Connection: @unchecked Sendable {
     public let session = Session()
     private let fd: Int32
     private let server: ServerDefinition
-    private let writer = DispatchQueue(label: "mac-mcp.connection.writer")
+    public struct Limits: Sendable {
+        public var frameBytes = StreamIO.frameLimit
+        public var queuedBytes = StreamIO.queueLimit
+        public var queuedFrames = 64
+        public var concurrentCalls = 32
+        public var batchSize = 128
+        public var writeTimeout: TimeInterval = 10
+        public init() {}
+    }
+    private let limits: Limits
+    private let writer: StreamWriter
+    private var closed = false
+    private var receivedMessage = false
+    private let input: FrameBackpressure
+    private var bufferedResponseBytes = 0
+    private var callBytes = 0
     private let lock = NSLock()
     private var calls: [String: Task<Void, Never>] = [:]   // in-flight tools/call by canonical request id
     private var cancelled: Set<String> = []
     private var readEnd = "?"   // how the reader stopped (read result and errno), for the log
 
-    public init(fd: Int32, server: ServerDefinition) {
+    public init(fd: Int32, server: ServerDefinition, limits: Limits = Limits()) {
         self.fd = fd
         self.server = server
+        self.limits = limits
+        self.input = FrameBackpressure(maxFrames: limits.queuedFrames, maxBytes: limits.queuedBytes)
+        self.writer = StreamWriter(fd: fd, maxBytes: limits.queuedBytes, timeout: limits.writeTimeout)
         var on: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))   // a vanished client is EPIPE, not a signal
     }
 
     /// Serves until the client closes the connection. In-flight calls are then cancelled.
     public func run() async {
+        do { try StreamIO.configure(fd) } catch { return }
         let (lines, continuation) = AsyncStream<Data>.makeStream()
+        let readerDone = DispatchGroup()
+        readerDone.enter()
         let fd = fd
         let reader = Thread { [self] in
             var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-            var framing = LineBuffer()
-            while true {
+            var framing = LineBuffer(maxBytes: limits.frameBytes)
+            defer { continuation.finish(); readerDone.leave() }
+            while !lock.withLock({ closed }) {
+                do { try StreamIO.wait(fd, events: Int16(POLLIN), deadline: .infinity) }
+                catch { break }
                 let n = read(fd, &buffer, buffer.count)
-                if n < 0, errno == EINTR { continue }
+                if n < 0, errno == EINTR || errno == EAGAIN { continue }
                 if n <= 0 {
-                    let why = "read=\(n) errno=\(n < 0 ? errno : 0)"
-                    lock.withLock { readEnd = why }
+                    lock.withLock { readEnd = "read=\(n) errno=\(n < 0 ? errno : 0)" }
+                    closeAdmission()
                     break
                 }
-                for line in framing.append(buffer[0..<n]) { continuation.yield(line) }
+                let framed = framing.append(buffer[0..<n])
+                if framing.exceededLimit { closeAdmission(); break }
+                for line in framed {
+                    guard input.admit(line.count) else { closeAdmission(); return }
+                    if case .terminated = continuation.yield(line) { return }
+                }
             }
-            continuation.finish()
         }
         reader.name = "mac-mcp.connection.reader"
         reader.start()
-        for await line in lines { await handle(line) }
-        let (inFlight, why) = lock.withLock { () -> (Int, String) in
-            calls.values.forEach { $0.cancel() }
-            return (calls.count, readEnd)
+        for await line in lines {
+            input.remove(line.count)
+            guard !lock.withLock({ closed }) else { break }
+            await handle(line)
         }
-        if inFlight > 0 {   // the client vanished mid-call: say how the socket ended, since no one asked to cancel
+        closeAdmission()
+        let (inFlight, why) = lock.withLock { (calls.count, readEnd) }
+        if inFlight > 0 {
             log("connection \(await session.id) (\(await session.client)) ended with \(inFlight) call(s) in flight: \(why)")
         }
-        await Claims.shared.release(session: session.id)   // a gone client (a dropped SSH link) frees the GUI at once
-        writer.sync {}   // flush what's queued before the caller closes the socket
+        await Claims.shared.release(session: session.id)
+        await withCheckedContinuation { c in readerDone.notify(queue: .global()) { c.resume() } }
+        await writer.finish()   // asynchronous barrier: the caller may now close/reuse the descriptor
+    }
+
+    private func closeAdmission() {
+        lock.withLock {
+            closed = true
+            calls.values.forEach { $0.cancel() }
+        }
+        input.close()
+        writer.abort()
     }
 
     // MARK: messages
 
+    private typealias Reply = @Sendable (Value?) -> Void
+
     func handle(_ line: Data) async {
         if line.starts(with: Data("#mac-mcp".utf8)) {
-            await session.apply(directive: String(decoding: line, as: UTF8.self))
+            if !receivedMessage { await session.apply(directive: String(decoding: line, as: UTF8.self)) }
             return
         }
+        receivedMessage = true
         guard let message = try? Value.parse(line) else {
-            return send(error: RPCError.parse, "Parse error: not valid JSON", id: .null)
+            return send(error: RPCError.parse, "Parse error: not valid JSON", id: .null, reply: directReply)
         }
+        if case let .array(batch) = message {
+            guard await session.supportsBatches, !batch.isEmpty, batch.count <= limits.batchSize else {
+                return send(error: RPCError.invalidRequest, "Invalid request: empty, oversized or unsupported batch", id: .null, reply: directReply)
+            }
+            guard let responses = BatchResponses(entries: batch, frameBytes: limits.frameBytes, reserve: { [self] bytes in
+                lock.withLock {
+                    guard bytes <= limits.queuedBytes - bufferedResponseBytes else { return false }
+                    bufferedResponseBytes += bytes
+                    return true
+                }
+            }, release: { [self] bytes in lock.withLock { bufferedResponseBytes -= bytes } }, send: { [self] in write($0) }) else {
+                return send(error: -32603, "Batch response ids exceed the response buffer; narrow the request",
+                            id: .null, reply: directReply)
+            }
+            for (index, entry) in batch.enumerated() {
+                await handle(entry, reply: { responses.finish(index, response: $0) })
+            }
+            return
+        }
+        await handle(message, reply: directReply)
+    }
+
+    private var directReply: Reply { { [self] in if let message = $0 { write(message) } } }
+
+    private func handle(_ message: Value, reply: @escaping Reply) async {
         guard case let .object(m) = message else {
-            return send(error: RPCError.invalidRequest, "Invalid request: expected a JSON-RPC object (batches aren't supported)", id: .null)
+            return send(error: RPCError.invalidRequest, "Invalid request: expected a JSON-RPC object", id: .null, reply: reply)
+        }
+        guard m["jsonrpc"] == "2.0" else {
+            return send(error: RPCError.invalidRequest, "Invalid request: jsonrpc must be 2.0", id: .null, reply: reply)
         }
         let id = m["id"]
         guard let method = m["method"]?.stringValue else {
-            if id != nil, m["result"] != nil || m["error"] != nil { return }   // a response to a request we never send
-            return send(error: RPCError.invalidRequest, "Invalid request: no method", id: id ?? .null)
+            if id != nil, m["result"] != nil || m["error"] != nil { reply(nil); return }   // a response to a request we never send
+            return send(error: RPCError.invalidRequest, "Invalid request: no method", id: id ?? .null, reply: reply)
         }
         let params = m["params"]?.objectValue ?? [:]
         let meta = params["_meta"]?.objectValue ?? [:]
         let modern = meta[Self.metaVersionKey]?.stringValue
         if let modern { await session.setProtocolVersion(modern) }
-        if let info = meta[Self.metaClientInfoKey] { await session.setClient(info) }
+        if modern != nil { await session.identifyOnce(meta[Self.metaClientInfoKey]) }
         guard let id, id.stringValue != nil || id.intValue != nil else {
-            if id != nil { return send(error: RPCError.invalidRequest, "Invalid request: id must be a string or number", id: .null) }
-            return await notification(method, params)
+            if id != nil { return send(error: RPCError.invalidRequest, "Invalid request: id must be a string or number", id: .null, reply: reply) }
+            await notification(method, params)
+            reply(nil)
+            return
         }
         if let modern {
             guard Self.statelessVersions.contains(modern) else {
                 return send(error: Self.unsupportedVersion, "Unsupported protocol version", id: id,
-                            data: ["supported": supportedVersions, "requested": .string(modern)])
+                            data: ["supported": supportedVersions, "requested": .string(modern)], reply: reply)
             }
             guard meta[Self.metaClientCapabilitiesKey] != nil else {
                 return send(error: RPCError.invalidParams,
-                            "Invalid params: _meta must include \(Self.metaClientCapabilitiesKey)", id: id)
+                            "Invalid params: _meta must include \(Self.metaClientCapabilitiesKey)", id: id, reply: reply)
             }
         }
-        await request(method, params, id: id, modern: modern != nil || method == "server/discover")
+        let context = await session.snapshot(version: modern, info: meta[Self.metaClientInfoKey])
+        await request(method, params, id: id, modern: modern != nil || method == "server/discover", context: context, reply: reply)
     }
 
     private func notification(_ method: String, _ params: [String: Value]) async {
@@ -202,19 +322,18 @@ public final class Connection: @unchecked Sendable {
         }
     }
 
-    private func request(_ method: String, _ params: [String: Value], id: Value, modern: Bool) async {
+    private func request(_ method: String, _ params: [String: Value], id: Value, modern: Bool, context: RequestContext, reply: @escaping Reply) async {
         switch method {
         case "initialize":
             let requested = params["protocolVersion"]?.stringValue ?? ""
             let version = Self.handshakeVersions.contains(requested) ? requested : Self.latestHandshakeVersion
-            await session.setProtocolVersion(version)
-            await session.setClient(params["clientInfo"])
+            await session.negotiate(version: version, info: params["clientInfo"])
             send(result: [
                 "protocolVersion": .string(version),
                 "capabilities": capabilities,
                 "serverInfo": serverInfo,
                 "instructions": .string(server.instructions),
-            ], id: id)
+            ], id: id, reply: reply)
         case "server/discover":
             send(result: [
                 "supportedVersions": supportedVersions,
@@ -222,45 +341,59 @@ public final class Connection: @unchecked Sendable {
                 "instructions": .string(server.instructions),
                 "ttlMs": .int(Self.listTTL),
                 "cacheScope": "public",
-            ], id: id, modern: true)
+            ], id: id, modern: true, reply: reply)
         case "ping":   // legacy only (removed in 2026-07-28); harmless to answer either way
-            send(result: [:], id: id, modern: modern)
+            send(result: [:], id: id, modern: modern, reply: reply)
         case "tools/list":
             var result: [String: Value] = ["tools": .array(server.tools.map(\.json))]
             if modern { result["ttlMs"] = .int(Self.listTTL); result["cacheScope"] = "public" }
-            send(result: result, id: id, modern: modern)
+            send(result: result, id: id, modern: modern, reply: reply)
         case "tools/call":
             guard let name = params["name"]?.stringValue else {
-                return send(error: RPCError.invalidParams, "Invalid params: tools/call needs a string \"name\"", id: id)
+                return send(error: RPCError.invalidParams, "Invalid params: tools/call needs a string \"name\"", id: id, reply: reply)
             }
             guard let arguments = params["arguments"].map({ $0.objectValue }) ?? [:] else {
-                return send(error: RPCError.invalidParams, "Invalid params: \"arguments\" must be an object", id: id)
+                return send(error: RPCError.invalidParams, "Invalid params: \"arguments\" must be an object", id: id, reply: reply)
             }
             if modern, !server.tools.contains(where: { $0.name == name }) {
                 // 2026-07-28: an unknown tool is a protocol error (legacy clients get an isError result instead).
-                return send(error: RPCError.invalidParams, "Invalid params: unknown tool \(name)", id: id)
+                return send(error: RPCError.invalidParams, "Invalid params: unknown tool \(name)", id: id, reply: reply)
             }
-            startCall(name, arguments, id: id, modern: modern)
+            startCall(name, arguments, id: id, modern: modern, context: context,
+                      bytes: Value.object(params).jsonData().count + id.jsonData().count, reply: reply)
         default:
-            send(error: RPCError.methodNotFound, "Method not found: \(method)", id: id)
+            send(error: RPCError.methodNotFound, "Method not found: \(method)", id: id, reply: reply)
         }
     }
 
-    private func startCall(_ name: String, _ arguments: [String: Value], id: Value, modern: Bool) {
+    private func startCall(_ name: String, _ arguments: [String: Value], id: Value, modern: Bool,
+                           context: RequestContext, bytes: Int, reply: @escaping Reply) {
         let key = Self.key(id)
-        let server = server, session = session
-        lock.withLock {
+        let rejection: String? = lock.withLock {
+            guard !closed else { return "Connection closed" }
+            guard calls[key] == nil else { return "Request id already in flight" }
+            guard calls.count < limits.concurrentCalls else { return "Too many concurrent tool calls (limit \(limits.concurrentCalls))" }
+            guard bytes <= limits.queuedBytes - callBytes else { return "In-flight request byte limit exceeded" }
+            callBytes += bytes
             calls[key] = Task {
-                let result = await server.call(name, arguments, session)
-                let wasCancelled = self.lock.withLock {
-                    self.calls[key] = nil
-                    return self.cancelled.remove(key) != nil
+                defer {
+                    self.lock.withLock {
+                        self.calls[key] = nil
+                        self.callBytes -= bytes
+                        self.cancelled.remove(key)
+                    }
                 }
-                guard !wasCancelled else { return }   // the client withdrew the request: no response
+                let result = await server.call(name, arguments, context)
+                let suppressed = self.lock.withLock {
+                    self.cancelled.contains(key) || self.closed || Task.isCancelled
+                }
+                guard !suppressed else { reply(nil); return }
                 self.send(result: ["content": .array(result.content.map(\.json)), "isError": .bool(result.isError)],
-                          id: id, modern: modern)
+                          id: id, modern: modern, reply: reply)
             }
+            return nil
         }
+        if let rejection { send(error: -32603, rejection, id: id, reply: reply) }
     }
 
     private var capabilities: Value { ["tools": ["listChanged": false]] }
@@ -270,38 +403,137 @@ public final class Connection: @unchecked Sendable {
     // MARK: output
 
     /// Modern results say they're complete (not a multi-round-trip `input_required`) and who answered.
-    private func send(result: [String: Value], id: Value, modern: Bool = false) {
+    private func send(result: [String: Value], id: Value, modern: Bool = false, reply: Reply) {
         var result = result
         if modern {
             result["resultType"] = "complete"
             result["_meta"] = [Self.metaServerInfoKey: serverInfo]
         }
-        write(["jsonrpc": "2.0", "id": id, "result": .object(result)])
+        reply(["jsonrpc": "2.0", "id": id, "result": .object(result)])
     }
 
-    private func send(error code: Int, _ message: String, id: Value, data: Value? = nil) {
+    private func send(error code: Int, _ message: String, id: Value, data: Value? = nil, reply: Reply) {
         var error: [String: Value] = ["code": .int(code), "message": .string(message)]
         if let data { error["data"] = data }
-        write(["jsonrpc": "2.0", "id": id, "error": .object(error)])
+        reply(["jsonrpc": "2.0", "id": id, "error": .object(error)])
     }
 
     private func write(_ message: Value) {
         var data = message.jsonData()
-        data.append(0x0A)
-        let fd = fd
-        writer.async {
-            data.withUnsafeBytes { raw in
-                var offset = 0
-                while offset < raw.count {
-                    let n = Darwin.write(fd, raw.baseAddress! + offset, raw.count - offset)
-                    if n < 0, errno == EINTR { continue }
-                    if n <= 0 { return }   // the client is gone; the reader will see EOF
-                    offset += n
-                }
-            }
+        if data.count + 1 > limits.frameBytes {
+            data = Self.responseTooLarge(id: message["id"] ?? .null, bytes: data.count + 1).jsonData()
         }
+        data.append(0x0A)
+        guard data.count <= limits.frameBytes, writer.send(data) else { closeAdmission(); return }
+    }
+
+    static func responseTooLarge(id: Value, bytes: Int) -> Value {
+        let megabytes = String(format: "%.2f", Double(bytes) / (1024 * 1024))
+        return ["jsonrpc": "2.0", "id": id, "error": ["code": -32603,
+            "message": .string("response too large (\(megabytes) MB); narrow the request, e.g. a smaller region or max_tokens")]]
     }
 
     /// Request ids compare by JSON value: 7 and "7" are different requests.
     static func key(_ id: Value) -> String { String(decoding: id.jsonData(), as: UTF8.self) }
+}
+
+/// Only the dedicated reader waits here. Consumers and teardown wake it without blocking the cooperative pool.
+final class FrameBackpressure: @unchecked Sendable {
+    private let condition = NSCondition()
+    private let maxFrames: Int
+    private let maxBytes: Int
+    private var frames = 0
+    private var bytes = 0
+    private var closed = false
+    private let onWait: @Sendable () -> Void
+
+    init(maxFrames: Int, maxBytes: Int, onWait: @escaping @Sendable () -> Void = {}) {
+        self.maxFrames = maxFrames
+        self.maxBytes = maxBytes
+        self.onWait = onWait
+    }
+
+    func admit(_ size: Int) -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        guard size <= maxBytes, maxFrames > 0 else { return false }
+        while !closed, frames >= maxFrames || size > maxBytes - bytes {
+            onWait()
+            condition.wait()   // lint:allow-blocking dedicated socket reader, woken by consumption or teardown
+        }
+        guard !closed else { return false }
+        frames += 1
+        bytes += size
+        return true
+    }
+
+    func remove(_ size: Int) {
+        condition.lock()
+        defer { condition.unlock() }
+        frames -= 1
+        bytes -= size
+        condition.signal()
+    }
+
+    func close() {
+        condition.lock()
+        defer { condition.unlock() }
+        closed = true
+        condition.broadcast()
+    }
+}
+
+/// Reserve an error slot for every entry before accepting larger results, including array framing. The final
+/// array therefore fits one frame even when every remaining call needs an oversized-response error.
+private final class BatchResponses: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining: Int
+    private var responses: [Int: Value] = [:]
+    private var sizes: [Int]
+    private var bytes: Int
+    private let frameBytes: Int
+    private let reserve: @Sendable (Int) -> Bool
+    private let release: @Sendable (Int) -> Void
+    private let send: @Sendable (Value) -> Void
+
+    init?(entries: [Value], frameBytes: Int, reserve: @escaping @Sendable (Int) -> Bool,
+          release: @escaping @Sendable (Int) -> Void, send: @escaping @Sendable (Value) -> Void) {
+        remaining = entries.count
+        self.frameBytes = frameBytes
+        self.reserve = reserve
+        self.release = release
+        self.send = send
+        // Int.max reserves the longest size label a replacement error can need.
+        sizes = entries.map { Connection.responseTooLarge(id: $0["id"] ?? .null, bytes: Int.max).jsonData().count + 1 }
+        bytes = sizes.reduce(2, +)   // '[' and ']\n', less the final comma
+        guard bytes <= frameBytes, reserve(bytes) else { bytes = 0; return nil }
+    }
+
+    deinit { release(bytes) }
+
+    func finish(_ index: Int, response: Value?) {
+        lock.withLock {
+            let oldSize = sizes[index]
+            var response = response
+            var size = response.map { $0.jsonData().count + 1 } ?? 0
+            if size > oldSize {
+                if size <= frameBytes - bytes + oldSize, reserve(size - oldSize) {
+                    bytes += size - oldSize
+                } else if let original = response {
+                    response = Connection.responseTooLarge(id: original["id"] ?? .null, bytes: size)
+                    size = response!.jsonData().count + 1
+                }
+            }
+            if size < oldSize { release(oldSize - size); bytes -= oldSize - size }
+            sizes[index] = size
+            if let response { responses[index] = response }
+            remaining -= 1
+            if remaining == 0 {
+                if !responses.isEmpty { send(.array(responses.keys.sorted().compactMap { responses[$0] })) }
+                release(bytes)
+                bytes = 0
+                responses = [:]
+            }
+        }
+    }
 }

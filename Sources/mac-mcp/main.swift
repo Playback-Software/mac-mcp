@@ -12,12 +12,13 @@
 //   mac-mcp lease acquire [--minutes N] [--reason TEXT] [--holder NAME] [--pid PID]
 //   mac-mcp lease release [TOKEN] | status
 //   mac-mcp alerts setup ntfy TOPIC [--server URL] | setup url URL | test | off | status
+//   mac-mcp policy approve [--expect-sha256 HEX] | status | prune
 //   mac-mcp version
 import CoreGraphics
 import Foundation
 import MacMCPCore
 
-let cliVersion = "0.1.0"
+let cliVersion = "0.1.1"
 
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("mac-mcp: \(message)\n".utf8))
@@ -42,20 +43,21 @@ func unreachable(_ error: Any) -> String {
 /// `RelaySession` watches them so that when the agent restarts, the relay reconnects, replays the client's
 /// handshake, and answers calls that were cut off with an error rather than ending the client's session.
 final class Relay: @unchecked Sendable {
-    // `lock` guards everything mutable. Lines bound for the agent are queued on `toAgent` while holding it, so
-    // they reach the socket in the order the session produced them. Only the socket reader writes stdout.
     private let lock = NSLock()
+    private let clientWriter = NSLock()
     private var session = RelaySession()
     private var fd: Int32
+    private var writer: StreamWriter
     private var stdinOpen = true
-    private let toAgent = DispatchQueue(label: "relay.to-agent")
-
-    /// Presented to every agent connection (including reconnects): the lease (if MAC_MCP_LEASE is set), where this
-    /// session comes from, and one session id for the life of the relay.
     private let directive = AgentClient.directive(lease: LeaseStore.ownToken, origin: AgentClient.origin(),
                                                   session: AgentClient.newSessionID())
 
-    init(fd: Int32) { self.fd = fd }
+    init(fd: Int32) throws {
+        self.fd = fd
+        self.writer = StreamWriter(fd: fd)
+        try StreamIO.configure(fd)
+        try StreamIO.configure(STDOUT_FILENO)
+    }
 
     func run() -> Never {
         signal(SIGPIPE, SIG_IGN)
@@ -72,110 +74,115 @@ final class Relay: @unchecked Sendable {
             let n = read(STDIN_FILENO, &buffer, buffer.count)
             if n < 0, errno == EINTR { continue }
             if n <= 0 { break }
-            for line in lines.append(buffer[0..<n]) {
-                lock.withLock { sendToAgent(session.fromClient(line).toAgent) }
+            let framed = lines.append(buffer[0..<n])
+            if lines.exceededLimit { fail("client frame exceeds 16 MiB") }
+            for line in framed {
+                let out = lock.withLock {
+                    let out = session.fromClient(line)
+                    sendToAgent(out.toAgent)
+                    return out
+                }
+                sendToClient(out.toClient)
             }
         }
-        // Client closed stdin: half-close so the agent sees EOF but can still send its last responses.
         lock.withLock {
             stdinOpen = false
-            guard session.phase == .connected else { exit(0) }  // nobody left to reconnect for
-            let fd = fd
-            toAgent.async { shutdown(fd, SHUT_WR) }
+            guard session.phase == .connected else { exit(0) }
+            writer.halfClose()
         }
     }
 
     private func readAgent() {
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        var outageStarted: Date?
         while true {
             var lines = LineBuffer()
+            let currentFD = lock.withLock { fd }
             while true {
-                let n = read(fd, &buffer, buffer.count)
-                if n < 0, errno == EINTR { continue }
+                let expired = lock.withLock { session.expire() }
+                sendToClient(expired.toClient)
+                if let failure = lock.withLock({ session.failure }) { fail(failure) }
+                let deadline = lock.withLock { session.reconnectDeadline } ?? .infinity
+                do { try StreamIO.wait(currentFD, events: Int16(POLLIN), deadline: deadline) }
+                catch {
+                    let out = lock.withLock { session.expire() }
+                    sendToClient(out.toClient)
+                    if let failure = lock.withLock({ session.failure }) { fail(failure) }
+                    break
+                }
+                let n = read(currentFD, &buffer, buffer.count)
+                if n < 0, errno == EINTR || errno == EAGAIN { continue }
                 if n <= 0 { break }
-                for line in lines.append(buffer[0..<n]) {
-                    let toClient = lock.withLock {
+                let framed = lines.append(buffer[0..<n])
+                if lines.exceededLimit { fail("agent frame exceeds 16 MiB") }
+                for line in framed {
+                    let out = lock.withLock {
+                        let expired = session.expire()
+                        if session.failure != nil { return expired }
                         let out = session.fromAgent(line)
                         sendToAgent(out.toAgent)
-                        if session.phase == .connected { outageStarted = nil }
-                        return out.toClient
+                        return out
                     }
-                    sendToClient(toClient)
+                    sendToClient(out.toClient)
+                    if let failure = lock.withLock({ session.failure }) { fail(failure) }
                 }
             }
-
             let lost = lock.withLock {
-                if !stdinOpen { exit(0) }  // the normal end of a session
-                let fd = fd
-                toAgent.async { close(fd) }  // after anything still queued for it
-                return session.agentLost().toClient
+                writer.finish { close(currentFD) }
+                if !stdinOpen { exit(0) }
+                return session.agentLost()
             }
-            sendToClient(lost)
+            sendToClient(lost.toClient)
             FileHandle.standardError.write(Data("mac-mcp: lost the agent connection; reconnecting\n".utf8))
-
-            // The window only resets once a new connection is through the replayed handshake, so an agent that
-            // keeps dying during it can't keep the client waiting forever.
-            let started = outageStarted ?? Date()
-            outageStarted = started
-            reconnect(deadline: started.addingTimeInterval(reconnectWindow))
-            if lock.withLock({ session.phase == .connected }) { outageStarted = nil }
-            FileHandle.standardError.write(Data("mac-mcp: reconnected to the agent\n".utf8))
+            reconnect()
         }
     }
 
-    private func reconnect(deadline: Date) {
+    private func reconnect() {
         while true {
-            let error: Error
+            let out = lock.withLock { session.expire() }
+            sendToClient(out.toClient)
+            if let failure = lock.withLock({ session.failure }) { fail(failure) }
+            let deadline = lock.withLock { session.reconnectDeadline } ?? (StreamIO.now + reconnectWindow)
             do {
-                let new = try UnixSocket.connect(path: Paths.socket)
-                lock.withLock {
-                    fd = new
-                    if let directive { sendToAgent([directive.dropLast()]) }
-                    sendToAgent(session.agentReconnected().toAgent)
-                }
-                return
-            } catch let e { error = e }
-            if Date() >= deadline {
+                let new = try UnixSocket.connect(path: Paths.socket, deadline: deadline)
+                try StreamIO.configure(new)
                 let out = lock.withLock {
-                    session.giveUp(reason: "The MacMCP agent did not come back within \(Int(reconnectWindow)) s. "
-                        + "Run `mac-mcp doctor` on the Mac.")
+                    fd = new
+                    writer = StreamWriter(fd: new)
+                    let expired = session.expire()
+                    if session.failure != nil { writer.finish { close(new) }; return expired }
+                    if let directive { sendToAgent([directive.dropLast()]) }
+                    let out = session.agentReconnected()
+                    sendToAgent(out.toAgent)
+                    return out
                 }
                 sendToClient(out.toClient)
-                fail(unreachable(error))
+                if let failure = lock.withLock({ session.failure }) { fail(failure) }
+                return
+            } catch {
+                usleep(200_000)   // CLI's dedicated reconnect thread
             }
-            usleep(200_000)
         }
     }
 
-    /// Call holding `lock`. A failed write is ignored: the reader sees the connection drop and recovers.
+    /// Call holding `lock`. Failure shuts down the socket and wakes the reader; queued writes stay bounded.
     private func sendToAgent(_ lines: [Data]) {
-        guard !lines.isEmpty else { return }
-        let fd = fd
-        toAgent.async { for line in lines { _ = Self.writeAll(fd, line + [0x0A]) } }
+        for line in lines { if !writer.send(line + [0x0A]) { break } }
     }
 
     private func sendToClient(_ lines: [Data]) {
-        for line in lines where !Self.writeAll(STDOUT_FILENO, line + [0x0A]) { exit(0) }  // the client is gone
-    }
-
-    private static func writeAll(_ fd: Int32, _ data: Data) -> Bool {
-        data.withUnsafeBytes { raw in
-            var offset = 0
-            while offset < raw.count {
-                let n = write(fd, raw.baseAddress! + offset, raw.count - offset)
-                if n < 0, errno == EINTR { continue }
-                if n <= 0 { return false }
-                offset += n
+        clientWriter.withLock {
+            for line in lines {
+                do { try StreamIO.writeAll(STDOUT_FILENO, line + [0x0A]) }
+                catch { exit(0) }
             }
-            return true
         }
     }
 }
 
 func relay() -> Never {
     do {
-        Relay(fd: try UnixSocket.connect(path: Paths.socket)).run()
+        try Relay(fd: UnixSocket.connect(path: Paths.socket)).run()
     } catch {
         fail(unreachable(error))
     }
@@ -233,6 +240,9 @@ func doctor() {
         if !session.onConsole && launchdSessionType() == "Aqua" {
             say("  console session:    nobody logged in? Log in via Remote Access.")
         }
+        let policy = PolicyStore.shared.status()
+        say("  policy:             \(policy.inForce)")
+        for problem in policy.problems { say("                      !! \(problem)") }
         say("\nAgent log: \(Paths.agentLog)")
         exit(1)
     }
@@ -245,7 +255,13 @@ func install() {
     do { try LaunchAgent.writePlist() } catch { fail("writing \(Paths.launchAgentPlist): \(error)") }
     try? FileManager.default.createDirectory(atPath: Paths.configDir, withIntermediateDirectories: true,
                                              attributes: [.posixPermissions: 0o700])
-    if (try? Policy.writeDefaultIfMissing()) == true { say("wrote default policy: \(Paths.policyFile)") }
+    if !FileManager.default.fileExists(atPath: Paths.policyFile),
+       case let .success(ledger) = PolicyStore.Locations.standard.keychain.ledger(), ledger.inForce != nil,
+       (try? PolicyStore.approve()) != nil {
+        say("restored \(Paths.policyFile) from the approved policy")   // not the defaults, which may be looser
+    } else if (try? Policy.writeDefaultIfMissing()) == true {
+        say("wrote default policy: \(Paths.policyFile)")
+    }
     _ = LaunchAgent.stop()
     // bootout can return before launchd has finished removing the service; bootstrapping into that window fails
     // with "Input/output error" (5). Wait for it to go, and retry a few times.
@@ -274,6 +290,13 @@ func uninstall(purge: Bool) {
     if purge {
         for path in [Paths.app, Paths.supportDir] { try? FileManager.default.removeItem(atPath: path) }
         say("Removed \(Paths.app) and \(Paths.supportDir). Logs kept in \(Paths.logsDir); config in \(Paths.configDir).")
+        // The next install approves policy.json afresh, as on a new Mac.
+        do {
+            let removed = try PolicyStore.forgetApproval(ask: askToDeleteRecords)
+            say(removed.kept == 0 ? "Removed the approved policy from your login keychain."
+                : "Could not remove \(removed.kept) of the approved policy's records from your login keychain; the next "
+                    + "install still enforces the newest one. Run `mac-mcp uninstall --purge` again to retry.")
+        } catch { say("Could not remove the approved policy from your login keychain: \(error)") }
     }
 }
 
@@ -344,10 +367,84 @@ func setPolicyValue(_ key: String, _ value: Any?) {
         try FileManager.default.createDirectory(atPath: Paths.configDir, withIntermediateDirectories: true)
         try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]).write(to: URL(fileURLWithPath: path))
     } catch { fail("writing \(path): \(error)") }
-    if case .failure = Policy.current() {
+    if case .failure = Policy.current(path: path) {
         if let original { try? original.write(to: URL(fileURLWithPath: path)) }
         fail("that change would make the policy invalid; left it unchanged")
     }
+    // A person ran this, so the change is approved, but only it: anything else that loosens the file still waits.
+    do { _ = try PolicyStore.approve(onlyKeys: [key], by: "`mac-mcp alerts`") } catch { say("note: \(error)") }
+}
+
+// MARK: - policy
+
+/// `mac-mcp policy approve | status | prune`. Changes to policy.json that loosen it (an app taken off deny_apps,
+/// scripting or web_eval turned on …) only take effect once a person approves them here, in Terminal: agents can reach
+/// the file through the apps they drive, but not this command, nor the login keychain where the approval is recorded.
+/// `--expect-sha256 HEX` approves only if policy.json's bytes have that SHA-256, for scripts that write the file and
+/// must not approve an edit made after they wrote it. `prune` deletes the older records of the approved policy that
+/// `approve` couldn't, since other builds of MacMCP made them; macOS asks for the keychain password for each.
+func policy(_ args: [String]) {
+    switch args.first ?? "status" {
+    case "approve":
+        var expected: String?
+        var rest = args.dropFirst()
+        while let arg = rest.popFirst() {
+            guard arg == "--expect-sha256", let hex = rest.popFirst()?.lowercased(),
+                  hex.count == 64, hex.allSatisfy({ "0123456789abcdef".contains($0) }) else {
+                fail("usage: mac-mcp policy approve [--expect-sha256 <64 hex digits>]")
+            }
+            expected = hex
+        }
+        do {
+            let approval = try PolicyStore.approve(expectSHA256: expected)
+            for note in approval.notes { say(note) }
+            if approval.loosenings.isEmpty {
+                say("Nothing in \(Paths.policyFile) loosens the approved policy.")
+            } else {
+                say("These changes loosen the policy:")
+                for l in approval.loosenings { say("  - \(l)") }
+            }
+            say("Approved: MacMCP now enforces \(Paths.policyFile). The approval is kept in your login keychain.")
+        } catch { fail("\(error)") }
+    case "status":
+        let status = PolicyStore.shared.status()
+        say("in force: \(status.inForce)")
+        if let approval = status.approvalLine { say(approval) }
+        if !status.pending.isEmpty {
+            say("\(Paths.policyFile) has changes that would loosen the policy, waiting for approval:")
+            for l in status.pending { say("  - \(l)") }
+            say("Review them, then run `mac-mcp policy approve` to apply them.")
+        }
+        for problem in status.problems { say("problem: \(problem)") }
+        for notice in status.notices { say("note: \(notice)") }
+        if status.source != .managed {
+            say("note: \(Paths.policyFile) is writable by your account and the apps agents drive; for an unattended Mac, "
+                + "install a managed policy in \(Paths.managedPolicyDir) (see docs/policy-and-security.md).")
+        }
+        if case .failure = status.enforced { exit(1) }
+        if !status.pending.isEmpty { exit(3) }
+    case "prune":
+        do {
+            let pruned = try PolicyStore.prune(ask: askToDeleteRecords)
+            if pruned.deleted == 0 && pruned.kept == 0 {
+                say("Nothing to prune: your login keychain holds only the approved policy in force.")
+            } else {
+                say("Deleted \(pruned.deleted) older record\(pruned.deleted == 1 ? "" : "s") of the approved policy"
+                    + (pruned.kept == 0 ? "." : "; \(pruned.kept) stay\(pruned.kept == 1 ? "s" : ""), ignored."))
+            }
+        } catch { fail("\(error)") }
+    default:
+        fail("usage: mac-mcp policy approve [--expect-sha256 HEX] | status | prune")
+    }
+}
+
+/// Said before macOS asks for the login keychain password to delete records other builds made, so the person at
+/// Terminal knows what the prompts are for.
+func askToDeleteRecords(_ count: Int) {
+    let one = count == 1
+    say("\(one ? "A record" : "\(count) records") of the approved policy \(one ? "was" : "were") made by another build of "
+        + "MacMCP (or another program), so macOS asks for your login keychain password to let mac-mcp delete "
+        + "\(one ? "it" : "each"). Enter it, or click Deny to keep \(one ? "it" : "that one"); records that stay are ignored.")
 }
 
 // MARK: - lease
@@ -364,7 +461,7 @@ func lease(_ args: [String]) {
     case "acquire":
         let pid = option("--pid").flatMap(Int32.init) ?? 0
         do {
-            let l = try LeaseStore.acquire(holder: option("--holder") ?? processName(getppid()), reason: option("--reason") ?? "unspecified",
+            let l = try LeaseStore.acquireWaiting(holder: option("--holder") ?? processName(getppid()), reason: option("--reason") ?? "unspecified",
                                            minutes: option("--minutes").flatMap(Double.init) ?? 60, pid: pid)
             print(l.token)
         } catch {
@@ -486,6 +583,8 @@ case "lease":
     lease(args)
 case "alerts":
     alerts(args)
+case "policy":
+    policy(args)
 case "report":
     report(args)
 case "remote-setup":
@@ -511,7 +610,7 @@ case "version", "--version":
     say("mac-mcp \(cliVersion)")
 case "help", "--help", "-h":
     say("usage: mac-mcp [relay | doctor | install | uninstall [--purge] | start | stop | restart | status | "
-        + "logs [--audit] [-n N] | call <tool> [json] | lease acquire|release|status | alerts setup|test|off|status | report [--since 7d] [--top N] | remote-setup [--name mac] | version]")
+        + "logs [--audit] [-n N] | call <tool> [json] | lease acquire|release|status | alerts setup|test|off|status | policy approve [--expect-sha256 HEX]|status|prune | report [--since 7d] [--top N] | remote-setup [--name mac] | version]")
 default:
     fail("unknown command '\(command)'. Try `mac-mcp help`.")
 }

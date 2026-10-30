@@ -27,7 +27,7 @@ enum ActionTools {
         guard let t else { return .error("Pass ref (from mac_snapshot) or x and y.") }
         return await runAction(name: "click", app: args.string("app"), target: t) { r, _ in
             let how = try await Actions.click(r!, button: button, count: count, modifiers: modifiers)
-            return "clicked \(r!.describe) (\(how))"
+            return ActionSummary("clicked \(r!.describe) (\(how))", audit: "clicked \(r!.auditName) (\(how))")
         }
     }
 
@@ -36,12 +36,13 @@ enum ActionTools {
         description: """
             Type text. With ref: focuses that field, confirms the focus landed, types, and reads the value back to \
             verify (mode=replace, the default, replaces the field's contents; append adds to it). Without ref: types \
-            into whatever has keyboard focus. submit=true presses Return afterwards. Newlines in text press Return.
+            at the current caret and selection. Explicit append places the caret through accessibility or refuses. \
+            submit=true verifies before Return. Newlines in text press Return.
             """,
         properties: [
             "text": Prop.string("The text to type."),
             "ref": Prop.string("The field to type into (from mac_snapshot). Default: the focused element."),
-            "mode": Prop.string("replace (default with ref) or append (default without ref).", enum: ["replace", "append"]),
+            "mode": Prop.string("replace (default with ref) or append (places the caret at the end through accessibility). Without ref or mode, inserts at the current caret.", enum: ["replace", "append"]),
             "submit": Prop.boolean("Press Return after typing."),
             "app": Prop.string("App to type into when no ref is given. Default: the frontmost app."),
         ],
@@ -52,12 +53,13 @@ enum ActionTools {
     ) { args, _ in
         guard let text = args.string("text") else { return .error("text is required.") }
         let ref = args.string("ref")
-        let mode = args.string("mode").flatMap(Actions.TypeMode.init(rawValue:)) ?? (ref == nil ? .append : .replace)
+        let mode = Actions.typingMode(args.string("mode"), hasRef: ref != nil)
         let submit = args.bool("submit") ?? false
         return await runAction(name: "type", app: args.string("app"), target: ref.map { .ref($0) },
                                      deadline: typeDeadline(text)) { r, pid in
             let note = try await Actions.type(r, pid: pid, text: text, mode: mode, submit: submit)
-            return (r.map { "into \($0.describe): " } ?? "at the focused element: ") + note
+            return ActionSummary((r.map { "into \($0.describe): " } ?? "at the focused element: ") + note,
+                                 audit: (r.map { "into \($0.auditName): " } ?? "at the focused element: ") + note)
         }
     }
 
@@ -65,9 +67,12 @@ enum ActionTools {
         name: "mac_key",
         description: """
             Press keys or shortcuts in the frontmost app (or app=, brought to the front first). Examples: "cmd+s", \
-            "esc", "return", "shift+tab", "cmd+a, delete" (a sequence), "down down return", "cmd+," (a comma right \
+            "esc", "return", "shift+tab", "cmd+a, delete" (a sequence), "down down", "cmd+," (a comma right \
             after + is the comma key; also "cmd+comma"). keys may also be a list: ["cmd+,", "return"]. Prefer mac_menu \
-            for menu commands (it doesn't depend on the right window having focus).
+            for menu commands (it doesn't depend on the right window having focus). In Finder, a file panel or an \
+            open menu, send a key that acts on the selection (Return, Space, Tab, Delete, cmd+…) in its own call, \
+            with mac_snapshot between calls; after a key that may open a panel or menu (cmd+s, cmd+o, Return), \
+            send Return or Space in another call.
             """,
         properties: [
             "keys": Prop.string("Key spec, comma/space-separated sequence, or a list of key specs. Punctuation names: "
@@ -84,6 +89,7 @@ enum ActionTools {
         do { specs = try list.map(KeySpec.parseSequence) ?? KeySpec.parseSequence(args.string("keys") ?? "") } catch { return .error("\(error)") }
         let shown = list?.joined(separator: ", ") ?? args.string("keys") ?? ""
         if let refusal = SessionSafety.refusal(keys: specs) { return .error(refusal) }
+        if let refused = await RouteGuards.keys(specs, app: args.string("app"), repeat: args.int("repeat") ?? 1) { return refused }
         let count = min(max(args.int("repeat") ?? 1, 1), 50)
         // About 50 ms per press: keep the whole call inside its deadline instead of being abandoned mid-way.
         guard specs.count * count <= 300 else {
@@ -91,12 +97,8 @@ enum ActionTools {
         }
         let app = args.string("app")
         return await runAction(name: "key", app: app, target: nil) { _, pid in
-            if NSRunningApplication(processIdentifier: pid).map({ !$0.isActive }) ?? false,
-               let running = NSRunningApplication(processIdentifier: pid), !(await AppControl.activate(AppInfo(running))) {
-                throw ActionError("\(running.localizedName ?? "The app") would not come to the front; keys would go elsewhere.")
-            }
-            Actions.keys(specs, repeat: count)
-            return "pressed \(shown)" + (count > 1 ? " ×\(count)" : "")
+            try await Actions.keys(specs, repeat: count, pid: pid)
+            return ActionSummary("pressed \(shown)" + (count > 1 ? " ×\(count)" : ""))
         }
     }
 
@@ -120,13 +122,16 @@ enum ActionTools {
             ?? (args.string("path") ?? "").components(separatedBy: ">").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         guard !path.isEmpty else { return .error("path is required, e.g. \"File > Save As…\".") }
         if let refusal = SessionSafety.refusal(menuPath: path) { return .error(refusal) }
+        if let refused = await RouteGuards.menu(path, app: args.string("app")) { return refused }
         return await runAction(name: "menu", app: args.string("app"), target: nil) { _, pid in
             // Menu commands act on the app's key window; if the app isn't active, some (Electron) open a new window.
             if NSRunningApplication(processIdentifier: pid).map({ !$0.isActive }) ?? false,
                let running = NSRunningApplication(processIdentifier: pid) {
                 _ = await AppControl.activate(AppInfo(running))
             }
-            return "chose " + (try await Actions.menu(pid: pid, path: path))
+            let chosen = try await Actions.menu(pid: pid, path: path)
+            // The titles are the app's own text; the log keeps the depth (the path is in the call's arguments).
+            return ActionSummary("chose " + Untrusted.inline(chosen), audit: "chose a menu item \(path.count) levels deep")
         }
     }
 
@@ -160,7 +165,7 @@ enum ActionTools {
         let modifiers: CGEventFlags
         do { modifiers = try KeySpec.modifiers(args.string("modifiers") ?? "") } catch { return .error("\(error)") }
         return await runAction(name: "scroll", app: args.string("app"), target: t) { r, pid in
-            try await Actions.scroll(r, pid: pid, direction: direction, amount: amount, unit: unit, modifiers: modifiers)
+            ActionSummary(try await Actions.scroll(r, pid: pid, direction: direction, amount: amount, unit: unit, modifiers: modifiers))
         }
     }
 
@@ -200,20 +205,20 @@ enum ActionTools {
         return await runAction(name: "drag", app: args.string("app"), target: from) { [timing] r, pid in
             // runAction vetted the source; the drop point gets the same checks before anything is pressed.
             let policy: Policy
-            switch Policy.current() { case let .success(p): policy = p; case let .failure(e): throw ActionError(e.description) }
+            switch await Policy.current() { case let .success(p): policy = p; case let .failure(e): throw ActionError(e.description) }
             if let dockApp {
                 let dock = try Actions.dockItem(dockApp)
                 if dock.bundleID != nil, let refusal = policy.refusal(bundleID: dock.bundleID, name: dock.name) {
                     throw ActionError(refusal)   // the dropped file would open in that app
                 }
-                return try await Actions.drag(from: r!, to: dock.target, timing: timing) + " (\(dock.name) in the Dock)"
+                let dragged = try await Actions.drag(from: r!, to: dock.target, timing: timing)
+                return ActionSummary(dragged + " (\(Untrusted.inline(dock.name)) in the Dock)", audit: dragged + " (onto a Dock icon)")
             }
-            var req = SnapshotRequest()
-            req.pid = r!.pid
-            let current = try await Snapshotter.take(req)
+            // The agent never sees this snapshot, so it must not update what the drop target's ref was last shown as.
+            let current = try await Snapshotter.take(bookkeepingSnapshot(pid: r!.pid))
             let dest = try await Actions.resolve(to!, currentSnapshot: current.snapshot)
-            if let refusal = targetRefusal(dest, checkedPid: pid, policy: policy) { throw ActionError(refusal) }
-            return try await Actions.drag(from: r!, to: dest, timing: timing)
+            if let refusal = try await Input.guardWork(pool: .route, timeout: Input.routeTimeout, { targetRefusal(dest, checkedPid: pid, policy: policy) }) { throw ActionError(refusal, audit: "Refused: drop target route") }
+            return ActionSummary(try await Actions.drag(from: r!, to: dest, timing: timing))
         }
     }
 

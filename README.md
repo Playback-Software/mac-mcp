@@ -114,12 +114,16 @@ MacMCP lets an AI agent operate your Mac as you. Run it on a Mac, or under an ac
 read [Policy and security](docs/policy-and-security.md) before you give it real work.
 
 - **Policy.** `~/.config/mac-mcp/policy.json` decides which apps agents may see and drive. By default they can't
-  touch Terminal, iTerm2, Script Editor, Automator, Shortcuts, Keychain Access, Passwords or System Settings.
-  AppleScript, running Shortcuts, JavaScript in web pages and private-network URLs are all off until you allow them.
-- **Refusals.** Agents can't answer macOS security and permission prompts, and password-field values are never
-  shown or logged. Text read from the screen is marked as untrusted data, not instructions.
-- **Audit log.** Every call is recorded in `~/Library/Logs/MacMCP/audit.jsonl`, with typed text redacted.
-  `mac-mcp report` summarises it.
+  touch terminals, launchers and automation apps, Shortcuts, Keychain Access, password managers or System Settings,
+  and AppleScript, Shortcuts, page JavaScript and private-network URLs are off until you allow them. A change that
+  loosens the policy applies only after you run `mac-mcp policy approve` in Terminal, which records it in your login
+  keychain.
+- **Refusals.** Agents can't answer macOS security prompts, read password fields or passwords copied from a password
+  manager, open launchers by side routes (the Dock, Finder, Services, `open=`), or touch MacMCP's own files, keychains,
+  SSH keys, credentials or shell startup files. Allowed scripts run behind an Apple-event gate. Screen and web text is
+  marked as untrusted data with a per-response token that page text can't forge.
+- **Audit log.** Every call is recorded in `~/Library/Logs/MacMCP/audit.jsonl`, with typed text, keys, script source
+  and URL secrets redacted. `mac-mcp report` summarises it.
 - **Local by design.** The socket is owner-only, there is no network listener, and remote access goes through SSH.
 
 Found a way around these? Please report it privately; see [SECURITY.md](SECURITY.md).

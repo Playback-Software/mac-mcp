@@ -262,8 +262,10 @@ def main() -> int:
     started = time.monotonic()
     try:
         env = dict(os.environ, MAC_MCP_LEASE=token)
-        subprocess.run([str(CLI), "call", "mac_app", json.dumps({"action": "launch", "app": HOST_ID,
-                       "open": "macmcp-testhost://reset"})], env=env, capture_output=True)
+        subprocess.run([str(CLI), "call", "mac_app", json.dumps({"action": "launch", "app": HOST_ID})],
+                       env=env, capture_output=True)
+        # mac_app open= takes only http(s), mailto and files: the reset URL goes through `open`.
+        subprocess.run(["open", "-b", HOST_ID, "macmcp-testhost://reset"], capture_output=True)
         # Let TestHost settle first: right after the integration tests it can still be recovering (focus, a frozen
         # spell), and the first typing then lands nowhere.
         time.sleep(2)

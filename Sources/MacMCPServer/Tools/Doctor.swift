@@ -19,10 +19,22 @@ enum DoctorTool {
         let lock = await ActionLock.shared.status
         let health = await HealthMonitor.shared.check(alert: false)
         let claims = await Claims.shared.all().map { "\($0.resource) by \($0.holder.label)" }
+        // Both wait on other processes (the keychain, launchctl): awaited here, never on the main thread.
+        let policy = await PolicyStore.shared.status()
+        let session = await launchdSession()
+        let keychainCall = PolicyStore.shared.heldUpKeychainCall
         return .text(await MainActor.run {
             report(client: context.client, screenRecording: screenRecording, captureFailure: captureFailure,
-                   automation: automation, lock: lock, health: health, claims: claims)
+                   automation: automation, lock: lock, health: health, claims: claims, launchdSession: session,
+                   policy: policy, keychainCall: keychainCall)
         })
+    }
+
+    /// `launchdSessionType()`, without blocking a thread on launchctl.
+    static func launchdSession() async -> String {
+        guard let r = try? await Subprocess.run("/bin/launchctl", ["managername"], timeout: 5), !r.timedOut else { return "unknown" }
+        let name = r.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? "unknown" : name
     }
 
     /// Takes a tiny real capture: a Screen Recording grant can read as granted yet fail to capture (a stale grant
@@ -39,11 +51,13 @@ enum DoctorTool {
     /// Automation (Apple Events) grant for each app in script.allowed_apps. Checks never prompt, and only work for
     /// running apps.
     static func automationLines() async -> [String] {
-        guard case let .success(p) = Policy.current(), !p.script.allowedApps.isEmpty else {
+        guard case let .success(p) = await Policy.current(), !p.script.allowedApps.isEmpty else {
             return ["      no apps in script.allowed_apps"]
         }
         var lines: [String] = []
+        lines.append("      System Events: " + (p.script.allowSystemEvents ? "explicitly enabled" : "off (script.allow_system_events)"))
         for app in p.script.allowedApps {
+            if let warning = Scripts.broadAccessWarning(for: app) { lines.append("  !!  " + warning) }
             guard let bundleID = Scripts.bundleID(for: app) else { lines.append("      \(app): not installed"); continue }
             let grant = await Scripts.automationGrant(bundleID: bundleID, timeout: 2)
             lines.append("  \(grant.isProblem ? "!! " : grant == .granted ? "OK " : "   ") \(app): \(grant.summary)")
@@ -53,7 +67,8 @@ enum DoctorTool {
 
     @MainActor
     static func report(client: String, screenRecording: Bool, captureFailure: String? = nil, automation: [String], lock: ActionLock.Status,
-                       health: HealthMonitor.Report, claims: [String] = []) -> String {
+                       health: HealthMonitor.Report, claims: [String] = [], launchdSession: String, policy: PolicyStatus,
+                       keychainCall: KeychainCall? = nil) -> String {
         var state = SessionState.current()
         state.screenRecording = screenRecording
         let identity = SigningIdentity.current()
@@ -64,16 +79,15 @@ enum DoctorTool {
         lines.append("  \(mark(state.onConsole)) GUI session on console: \(state.onConsole ? "yes" : "NO — log in via Remote Access")")
         lines.append("  \(mark(!state.screenLocked)) screen: \(state.screenLocked ? "LOCKED — unlock via Remote Access" : "unlocked")")
         lines.append("  \(mark(!state.displayAsleep)) display: \(state.displayAsleep ? "ASLEEP — wake it via Remote Access" : "awake")")
-        lines.append("      launchd session: \(launchdSessionType()) (must be Aqua)")
+        lines.append("      launchd session: \(launchdSession) (must be Aqua)")
         lines.append("")
         lines.append("Health (checked every 10 min; problems are alerted)")
         if let why = health.skipped {
             lines.append("      checks paused: \(why)")
         } else if health.problems.isEmpty {
             lines.append("  OK  permissions, capture, Secure Input and macOS prompts all fine")
-        } else {
-            for p in health.problems { lines.append("  !!  \(p.summary)") }
         }
+        for p in health.problems { lines.append("  !!  \(p.summary)") }
         lines.append("")
         lines.append("Control")
         lines.append("      GUI lease: \(LeaseStore.current().map { "held by \($0.summary); other clients can't act" } ?? "free")")
@@ -107,7 +121,7 @@ enum DoctorTool {
             lines.append("      no session yet (starts on the first web_* call; needs Safari ▸ Settings ▸ Developer ▸ "
                 + "\"Allow remote automation and external agents\")")
         }
-        if case let .success(p) = Policy.current() {
+        if case let .success(p) = policy.enforced {
             func list(_ l: [String]) -> String { l.isEmpty ? "none" : l.joined(separator: ", ") }
             lines.append("      \(p.web.enabled ? "enabled" : "DISABLED by policy") · web_eval \(p.web.evalAllowed ? "allowed" : "off")"
                 + " · deny_hosts: \(list(p.web.denyHosts))"
@@ -117,20 +131,7 @@ enum DoctorTool {
         lines.append("Identity")
         lines.append("  \(mark(!identity.isAdHoc)) signing: \(identity.summary)")
         lines.append("")
-        lines.append("Policy (\(Paths.policyFile))")
-        switch Policy.current() {
-        case let .failure(e):
-            lines.append("  !!  \(e.description)")
-        case let .success(p):
-            func list(_ l: [String]) -> String { l.isEmpty ? "none" : l.joined(separator: ", ") }
-            lines.append("  OK  deny_apps: \(list(p.denyApps))")
-            lines.append("      allow_apps: \(p.allowApps.isEmpty ? "any app not denied" : list(p.allowApps))")
-            lines.append("      mac_script may control: \(list(p.script.allowedApps)) (timeout \(p.script.timeoutSeconds) s)")
-            lines.append("      clipboard reads: \(p.clipboardRead ? "allowed" : "disabled")  ·  rate limit: \(p.rateLimitPerSecond) actions/s")
-            // Webhook URLs often embed a secret topic or token: show only the host.
-            lines.append("      alerts: " + (p.alertWebhook.flatMap { URL(string: $0)?.host }.map { "webhook to \($0) (cooldown \(p.alertCooldownMinutes) min)" }
-                ?? "agent log only (set alert_webhook to get notified when a person is needed)"))
-        }
+        lines += policyLines(policy, keychainCall: keychainCall)
         lines.append("")
         lines.append("Displays")
         for display in Displays.all() { lines.append("      " + display.line) }
@@ -142,5 +143,39 @@ enum DoctorTool {
         lines.append("")
         lines.append(state.actionBlocker.map { "Actions are BLOCKED: \($0)" } ?? "Actions can run.")
         return lines.joined(separator: "\n")
+    }
+
+    /// Which policy is in force and why, what's waiting for a person, and the policy's main settings.
+    /// `keychainCall`: a keychain call this agent made that hasn't returned in time.
+    static func policyLines(_ status: PolicyStatus, keychainCall: KeychainCall? = nil, now: Date = Date()) -> [String] {
+        var lines = ["Policy"]
+        let healthy = status.pending.isEmpty && status.problems.isEmpty && keychainCall == nil
+        lines.append("  \(healthy ? "OK " : "!! ") in force: \(status.inForce)")
+        if let approval = status.approvalLine { lines.append("      " + approval) }
+        if let pending = status.pendingMessage { lines.append("  !!  " + pending) }
+        if let keychainCall {
+            lines.append("  !!  keychain call held up for \(keychainCall.duration(now: now)): " + keychainCall.message)
+        }
+        for problem in status.problems where problem != keychainCall?.message { lines.append("  !!  " + problem) }
+        for notice in status.notices { lines.append("  --  " + notice) }
+        if status.source != .managed {
+            lines.append("  --  warning: \(Paths.policyFile) is writable by your user account, so apps an agent drives can "
+                + "edit it. Changes that loosen it wait for `mac-mcp policy approve`, which records them in your login "
+                + "keychain; on an unattended Mac, install a managed policy (root-owned, in \(Paths.managedPolicyDir)) instead.")
+        }
+        switch status.enforced {
+        case .failure:
+            break   // the reason is among the problems above
+        case let .success(p):
+            func list(_ l: [String]) -> String { l.isEmpty ? "none" : l.joined(separator: ", ") }
+            lines.append("      deny_apps: \(list(p.denyApps))")
+            lines.append("      allow_apps: \(p.allowApps.isEmpty ? "any app not denied" : list(p.allowApps))")
+            lines.append("      mac_script may control: \(list(p.script.allowedApps)) (timeout \(p.script.timeoutSeconds) s)")
+            lines.append("      clipboard reads: \(p.clipboardRead ? "allowed" : "disabled")  ·  rate limit: \(p.rateLimitPerSecond) actions/s")
+            // Webhook URLs often embed a secret topic or token: show only the host.
+            lines.append("      alerts: " + (p.alertWebhook.flatMap { URL(string: $0)?.host }.map { "webhook to \($0) (cooldown \(p.alertCooldownMinutes) min)" }
+                ?? "agent log only (set alert_webhook to get notified when a person is needed)"))
+        }
+        return lines
     }
 }

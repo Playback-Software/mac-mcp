@@ -27,6 +27,26 @@ import Testing
         #expect(!WaitTool.conditionMet(until: "gone", matches: [], stats: stats))
     }
 
+    /// A spinner whose title read failed while its node read fine is still there for all the walk knows: a failed
+    /// label or value read can't prove text is gone. A failed identifier read can't hide text, so it doesn't hold
+    /// up the wait.
+    @Test func failedLabelReadsCannotProveSomethingIsGoneButFailedIdentifiersDoNotHoldItUp() {
+        var text = WalkStats()
+        text.textReadFailures = 1
+        #expect(!text.textComplete)
+        #expect(!WaitTool.conditionMet(until: "gone", matches: [], stats: text))
+        var sample = SnapshotResult(snapshot: 1, app: AppInfo(NSRunningApplication.current), windowTitle: "Doc", focusRef: nil,
+                                    blockers: [], rows: [], lines: ["Current window"])
+        sample.stats = text
+        #expect(WaitTool.timeoutDiagnostic(sample).contains("Accessibility was incomplete"))
+        var identifier = WalkStats()
+        identifier.identityReadFailures = 1
+        #expect(!identifier.complete && identifier.textComplete)
+        #expect(WaitTool.conditionMet(until: "gone", matches: [], stats: identifier), "a failed identifier read can't hide text")
+        sample.stats = identifier
+        #expect(!WaitTool.timeoutDiagnostic(sample).contains("Accessibility was incomplete"))
+    }
+
     @Test func elementWaitIgnoresStaticTextMatches() {
         let rows = Snapshot.rows(from: RawNode(role: "AXStaticText", value: "Ready"), pid: 7)
         #expect(WaitTool.matchingRows(rows, query: "ready", until: "text").count == 1)
@@ -36,7 +56,7 @@ import Testing
     @Test func sparseTreeTimeoutShowsCurrentStateAndAnOCRRecoveryPath() {
         let app = AppInfo(NSRunningApplication.current)
         var sample = SnapshotResult(snapshot: 1, app: app, windowTitle: "Canvas", focusRef: nil,
-                                    blockers: [], rows: [], text: "Current canvas window")
+                                    blockers: [], rows: [], lines: ["Current canvas window"])
         sample.stats.truncated = true
         let diagnostic = WaitTool.timeoutDiagnostic(sample)
         #expect(diagnostic.contains("Current canvas window"))

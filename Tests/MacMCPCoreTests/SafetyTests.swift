@@ -53,12 +53,12 @@ private func tempPolicy(_ json: String) -> String {
 
 @Suite struct RateLimiterTests {
     @Test func spacesCallsOutWithoutRejecting() async {
-        let limiter = RateLimiter()
-        let start = Date()
+        let limiter = RateLimiter(), now = Date()
         var waits: [TimeInterval] = []
-        for _ in 0..<4 { waits.append(await limiter.acquire(rate: 20, now: Date())) }
+        for _ in 0..<4 { waits.append(await limiter.acquire(rate: 20, now: now)) }
         #expect(waits[0] == 0)
-        #expect(Date().timeIntervalSince(start) >= 0.14)   // 3 gaps of 50 ms
+        // Four callers arriving together get slots 50 ms apart.
+        for (i, wait) in waits.enumerated() { #expect(abs(wait - Double(i) * 0.05) < 0.001, "wait \(i): \(wait)") }
     }
 }
 
