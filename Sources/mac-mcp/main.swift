@@ -4,8 +4,14 @@
 //                          `ssh <mac> mac-mcp`. It passes messages through unchanged, reading just enough of
 //                          them to reconnect and replay the handshake when the agent restarts.
 //   mac-mcp doctor         Health report (asks the agent; falls back to local checks if it can't).
+//   mac-mcp setup          Guided first run at the Mac: session, agent, then the Accessibility and Screen Recording
+//                          grants (opens the System Settings panes and waits; never clicks), the doctor's report,
+//                          and an offer to add MacMCP to an AI client.
 //   mac-mcp install        Install/refresh the LaunchAgent for ~/Applications/MacMCP.app and start it.
+//   mac-mcp install --client NAME [--name mac] [--remote user@host] [--dry-run] [--create]
+//                          Add MacMCP to an AI client's MCP config (claude-code, claude-desktop, codex, cursor, vscode).
 //   mac-mcp uninstall [--purge]
+//   mac-mcp uninstall --client NAME [--name mac] [--dry-run]
 //   mac-mcp start | stop | restart | status
 //   mac-mcp logs [--audit] [-n N]
 //   mac-mcp call <tool> ['{json}'] [--save-image PATH] [--timeout SECONDS]
@@ -225,35 +231,47 @@ func call(_ args: [String]) {
 
 // MARK: - commands
 
-func doctor() {
+/// The doctor's report: the agent's, or, if it can't be reached, local checks.
+func doctorOutput() -> (text: String, reachable: Bool) {
     do {
-        say(try callTool("mac_doctor"))
+        return (try callTool("mac_doctor"), true)
     } catch {
         let fm = FileManager.default
-        say("Could not reach the agent: \(error)\n")
-        say("Local checks (from this \(launchdSessionType()) session):")
-        say("  app installed:      \(fm.fileExists(atPath: Paths.app) ? "yes" : "NO — build and install it (scripts/build.sh)") (\(Paths.app))")
-        say("  LaunchAgent plist:  \(fm.fileExists(atPath: Paths.launchAgentPlist) ? "yes" : "NO — run `mac-mcp install`")")
-        say("  LaunchAgent:        \(LaunchAgent.status())")
-        say("  socket:             \(fm.fileExists(atPath: Paths.socket) ? "present" : "missing") (\(Paths.socket))")
+        var lines = ["Could not reach the agent: \(error)\n",
+                     "Local checks (from this \(launchdSessionType()) session):",
+                     "  app installed:      \(fm.fileExists(atPath: Paths.app) ? "yes" : "NO — build and install it (scripts/build.sh)") (\(Paths.app))",
+                     "  LaunchAgent plist:  \(fm.fileExists(atPath: Paths.launchAgentPlist) ? "yes" : "NO — run `mac-mcp install`")",
+                     "  LaunchAgent:        \(LaunchAgent.status())",
+                     "  socket:             \(fm.fileExists(atPath: Paths.socket) ? "present" : "missing") (\(Paths.socket))"]
         let session = SessionState(sessionInfo: CGSessionCopyCurrentDictionary() as? [String: Any],
                                    displayAsleep: false, accessibility: true, screenRecording: true)
         if !session.onConsole && launchdSessionType() == "Aqua" {
-            say("  console session:    nobody logged in? Log in via Remote Access.")
+            lines.append("  console session:    nobody logged in? Log in via Remote Access.")
         }
         let policy = PolicyStore.shared.status()
-        say("  policy:             \(policy.inForce)")
-        for problem in policy.problems { say("                      !! \(problem)") }
-        say("\nAgent log: \(Paths.agentLog)")
-        exit(1)
+        lines.append("  policy:             \(policy.inForce)")
+        for problem in policy.problems { lines.append("                      !! \(problem)") }
+        lines.append("\nAgent log: \(Paths.agentLog)")
+        return (lines.joined(separator: "\n"), false)
     }
 }
 
-func install() {
+func doctor() {
+    let report = doctorOutput()
+    say(report.text)
+    if !report.reachable { exit(1) }
+}
+
+struct CLIError: Error, CustomStringConvertible {
+    let description: String
+}
+
+/// Writes the LaunchAgent plist and (re)starts the agent.
+func installAgent() throws {
     guard FileManager.default.fileExists(atPath: Paths.agentExecutable) else {
-        fail("\(Paths.app) not found. Build it first with scripts/build.sh.")
+        throw CLIError(description: "\(Paths.app) not found. Build it first with scripts/build.sh.")
     }
-    do { try LaunchAgent.writePlist() } catch { fail("writing \(Paths.launchAgentPlist): \(error)") }
+    do { try LaunchAgent.writePlist() } catch { throw CLIError(description: "writing \(Paths.launchAgentPlist): \(error)") }
     try? FileManager.default.createDirectory(atPath: Paths.configDir, withIntermediateDirectories: true,
                                              attributes: [.posixPermissions: 0o700])
     if !FileManager.default.fileExists(atPath: Paths.policyFile),
@@ -273,7 +291,7 @@ func install() {
         (code, out) = LaunchAgent.launchctl("bootstrap", LaunchAgent.domain, Paths.launchAgentPlist)
     }
     guard code == 0 else {
-        fail("launchctl bootstrap failed (\(code)): \(out)\n"
+        throw CLIError(description: "launchctl bootstrap failed (\(code)): \(out)\n"
             + "The agent can only start while someone is logged in at the console.")
     }
     // Wait until the new agent accepts connections (the old socket file may still exist, so don't trust the file).
@@ -282,6 +300,10 @@ func install() {
         usleep(100_000)
     }
     say("installed: \(LaunchAgent.status())")
+}
+
+func install() {
+    do { try installAgent() } catch { fail("\(error)") }
 }
 
 func uninstall(purge: Bool) {
@@ -563,6 +585,140 @@ func report(_ args: [String]) {
     say(UsageReport.render(UsageReport.load(), since: Date().addingTimeInterval(-span), top: top))
 }
 
+// MARK: - clients
+
+/// Runs a program for `ClientInstaller` (the `claude` CLI) and reports how it ended.
+let runProgram: ClientInstaller.CommandRunner = { executable, arguments in
+    guard let r = try? Subprocess.runBlocking(executable, arguments, timeout: 60) else { return (-1, "could not run \(executable)") }
+    let output = [r.stdout, r.stderr].filter { !$0.isEmpty }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    return (r.timedOut ? -1 : r.status, r.timedOut ? "timed out" : output)
+}
+
+/// Adds MacMCP to one client's config (`entry` nil removes it) and says what happened. False if it failed.
+func registerClient(_ client: McpClient, name: String = "mac", entry: ServerEntry?, dryRun: Bool = false, create: Bool = false) -> Bool {
+    do {
+        let report = try ClientInstaller.run(.init(client: client, name: name, entry: entry, dryRun: dryRun, createFolder: create),
+                                             runCommand: runProgram)
+        for line in report.lines { say(line) }
+        return true
+    } catch {
+        FileHandle.standardError.write(Data("mac-mcp: \(client.displayName): \(error)\n".utf8))
+        return false
+    }
+}
+
+/// `mac-mcp install --client NAME [--name mac] [--remote user@host] [--dry-run] [--create]` and
+/// `mac-mcp uninstall --client NAME [--name mac] [--dry-run]`. These edit the client's config only: the LaunchAgent and the
+/// app are left alone. Only `--client` selects this; without it `install` and `uninstall` act on the agent.
+func clientCommand(_ args: [String], remove: Bool) -> Never {
+    let usage = remove ? "usage: mac-mcp uninstall --client NAME [--name mac] [--dry-run]"
+        : "usage: mac-mcp install --client NAME [--name mac] [--remote user@host] [--dry-run] [--create]"
+    var client: McpClient?
+    var name = "mac"
+    var remote: String?
+    var dryRun = false, create = false
+    var rest = args[...]
+    while let arg = rest.popFirst() {
+        switch arg {
+        case "--client":
+            guard let value = rest.popFirst() else { fail(usage) }
+            guard let parsed = McpClient(argument: value) else {
+                fail("unknown client '\(value)'. Clients: \(McpClient.allCases.map(\.rawValue).joined(separator: ", ")).")
+            }
+            client = parsed
+        case "--name":
+            guard let value = rest.popFirst() else { fail(usage) }
+            name = value
+        case "--remote" where !remove:
+            guard let value = rest.popFirst() else { fail(usage) }
+            remote = value
+        case "--create" where !remove: create = true
+        case "--dry-run": dryRun = true
+        default: fail("\(arg) isn't an option here.\n\(usage)")
+        }
+    }
+    guard let client else { fail(usage) }
+    var entry: ServerEntry?
+    if !remove {
+        do { entry = try remote.map { try ServerEntry.remote($0) } ?? .local() } catch { fail("\(error)") }
+        if remote == nil, !FileManager.default.isExecutableFile(atPath: Paths.cli) {
+            say("note: \(Paths.cli) isn't there yet (scripts/build.sh installs it); the entry points at it anyway.")
+        }
+    }
+    exit(registerClient(client, name: name, entry: entry, dryRun: dryRun, create: create) ? 0 : 1)
+}
+
+// MARK: - setup
+
+/// `mac-mcp setup`'s view of this Mac and the person at it. See `SetupFlow`.
+final class TerminalSetupHost: SetupHost {
+    let interactive: Bool
+    let notInteractiveReason: String
+
+    init() {
+        let terminal = isatty(STDIN_FILENO) != 0 && isatty(STDOUT_FILENO) != 0
+        let aqua = launchdSessionType() == "Aqua"
+        interactive = terminal && aqua
+        notInteractiveReason = !terminal ? "not at a terminal" : "this is an SSH or background session, not Terminal on the Mac"
+    }
+
+    func say(_ text: String) { print(text) }
+
+    func session() -> SetupSession? {
+        guard launchdSessionType() == "Aqua" else { return nil }
+        let state = SessionState(sessionInfo: CGSessionCopyCurrentDictionary() as? [String: Any],
+                                 displayAsleep: CGDisplayIsAsleep(CGMainDisplayID()) != 0, accessibility: true, screenRecording: true)
+        return SetupSession(onConsole: state.onConsole, screenLocked: state.screenLocked, displayAsleep: state.displayAsleep)
+    }
+
+    func appInstalled() -> Bool { FileManager.default.fileExists(atPath: Paths.agentExecutable) }
+
+    func agentRunning() -> Bool { (try? UnixSocket.connect(path: Paths.socket)).map { close($0); return true } ?? false }
+
+    func startAgent() -> String? {
+        do { try installAgent(); return nil } catch { return "\(error)" }
+    }
+
+    /// Asks the running agent: the grants belong to MacMCP.app, not to this process.
+    func permissions() -> PermissionReport? {
+        guard let text = try? AgentClient(clientName: "mac-mcp-cli", version: cliVersion, timeout: 10).call("mac_doctor").text else { return nil }
+        return PermissionReport.parse(text)
+    }
+
+    func open(_ pane: SettingsPane) -> Bool {
+        guard let r = try? Subprocess.runBlocking("/usr/bin/open", [pane.url], timeout: 10) else { return false }
+        return !r.timedOut && r.status == 0
+    }
+
+    func ask(_ prompt: String) -> String? {
+        print(prompt, terminator: "")
+        fflush(stdout)
+        return readLine()
+    }
+
+    /// Waits for Return on the terminal, on this thread: setup is a synchronous command, like the rest of this CLI.
+    func waitForReturn(seconds: TimeInterval) -> Bool? {
+        do { try StreamIO.wait(STDIN_FILENO, events: Int16(POLLIN), deadline: StreamIO.now + seconds) }
+        catch { return errno == ETIMEDOUT ? false : nil }
+        var buffer = [UInt8](repeating: 0, count: 256)
+        let n = read(STDIN_FILENO, &buffer, buffer.count)
+        if n < 0, errno == EINTR { return false }
+        return n > 0 ? true : nil
+    }
+
+    func doctorReport() -> String { doctorOutput().text }
+
+    func register(_ client: McpClient) -> Bool {
+        let entry = ServerEntry.local()
+        return registerClient(client, entry: entry)
+    }
+}
+
+func setup(_ args: [String]) -> Never {
+    guard args.isEmpty else { fail("usage: mac-mcp setup") }
+    exit(SetupFlow.run(TerminalSetupHost()))
+}
+
 // MARK: - main
 
 var args = Array(CommandLine.arguments.dropFirst())
@@ -574,10 +730,14 @@ case "doctor":
     doctor()
 case "call":
     call(args)
+case "setup":
+    setup(args)
 case "install":
+    if args.contains("--client") { clientCommand(args, remove: false) }
     requireNoForeignLease(args, "installing")
     install()
 case "uninstall":
+    if args.contains("--client") { clientCommand(args, remove: true) }
     requireNoForeignLease(args, "uninstalling")
     uninstall(purge: args.contains("--purge"))
 case "lease":
@@ -610,7 +770,7 @@ case "logs":
 case "version", "--version":
     say("mac-mcp \(cliVersion)")
 case "help", "--help", "-h":
-    say("usage: mac-mcp [relay | doctor | install | uninstall [--purge] | start | stop | restart | status | "
+    say("usage: mac-mcp [relay | doctor | setup | install [--client NAME [--name mac] [--remote user@host] [--dry-run] [--create]] | uninstall [--purge | --client NAME [--name mac] [--dry-run]] | start | stop | restart | status | "
         + "logs [--audit] [-n N] | call <tool> [json] | lease acquire|release|status | alerts setup|test|off|status | policy approve [--expect-sha256 HEX]|status|prune | report [--since 7d] [--top N] | remote-setup [--name mac] | version]")
 default:
     fail("unknown command '\(command)'. Try `mac-mcp help`.")

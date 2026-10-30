@@ -96,16 +96,7 @@ enum DoctorTool {
             + (lock.abandoned > 0 ? "; \(lock.abandoned) abandoned at their deadline since the agent started" : ""))
         lines.append("")
         lines.append("Permissions (granted to MacMCP.app, \(Paths.bundleID))")
-        lines.append("  \(mark(state.accessibility)) Accessibility: "
-            + (state.accessibility ? "granted"
-               : "MISSING — System Settings > Privacy & Security > Accessibility (\"Device Control\" on macOS 27): enable MacMCP"))
-        lines.append("  \(mark(state.screenRecording && captureFailure == nil)) Screen Recording: "
-            + (state.screenRecording
-               ? captureFailure.map { "granted, but a test capture FAILED (\($0)). The grant may be stale: in System "
-                   + "Settings > Privacy & Security > Screen & System Audio Recording, turn MacMCP off and on again, "
-                   + "then restart the agent" } ?? "granted (test capture OK)"
-               : "MISSING — System Settings > Privacy & Security > Screen & System Audio Recording: enable MacMCP. "
-                 + "If MacMCP isn't listed, click +, press Cmd-Shift-G and enter \(Paths.app)"))
+        lines += PermissionReport.lines(accessibility: state.accessibility, screenRecording: state.screenRecording, captureFailure: captureFailure)
         lines.append("")
         lines.append("Automation (mac_script, granted to MacMCP per app)")
         lines += automation
