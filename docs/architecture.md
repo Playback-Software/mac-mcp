@@ -317,9 +317,12 @@ that `remote-setup` prints.
 | --- | --- | --- |
 | `claude-code` | `claude mcp add --scope user` if `claude` is on `PATH`; else `~/.claude.json` (`$CLAUDE_CONFIG_DIR/.claude.json` if set) | `mcpServers.<name>`: `type`, `command`, `args` |
 | `claude-desktop` | `~/Library/Application Support/Claude/claude_desktop_config.json` | `mcpServers.<name>`: `command`, `args` |
-| `codex` | `~/.codex/config.toml` (`$CODEX_HOME/config.toml` if set) | `[mcp_servers.<name>]` table: `command`, `args` |
+| `codex` | `codex mcp add` / `remove` if `codex` is on `PATH` (a new entry, or removing one); else, and to replace an entry that exists, `~/.codex/config.toml` (`$CODEX_HOME/config.toml` if set) | `[mcp_servers.<name>]` table: `command`, `args` |
 | `cursor` | `~/.cursor/mcp.json` | `mcpServers.<name>`: `command`, `args` |
 | `vscode` | `~/Library/Application Support/Code/User/mcp.json` | `servers.<name>`: `type`, `command`, `args` |
+
+Names (`--name`) use letters, digits, `.`, `_` and `-` (up to 64) and may not start with `-`, for every client, so a
+name is never read as a CLI option; the CLIs also get `--` before the name where they accept it.
 
 Editing a file:
 - **Only the MacMCP entry changes.** The JSON and TOML are parsed, then the entry's bytes are replaced, inserted or
@@ -328,18 +331,39 @@ Editing a file:
   `[mcp_servers.<name>]` table (and its sub-tables); one written as an inline table or dotted keys is refused, not rewritten.
   Replacing an entry replaces all of it, including keys you added to it.
 - **Parse errors stop it.** A file that isn't valid JSON or TOML, whose servers key isn't an object, or that names the
-  entry twice is refused with the line, and nothing is written.
-- **Backup, then an atomic write.** The original is copied to `<file>.macmcp-backup-<yyyymmdd-hhmmss>` (same permissions;
-  never overwritten, never deleted), the new file is written beside it and renamed over it, and the result is read back. On
-  a mismatch the original is restored. A file that changed since it was read isn't overwritten. A symlinked config is
-  followed, so the link stays.
-- **`--dry-run`** prints the lines that would change and writes nothing. For Claude Code with the CLI it prints the commands.
+  entry twice is refused with the line, and nothing is written. For TOML that also means duplicate keys, duplicate
+  `[table]` headers, a key and a table (or dotted keys and a header) that redefine each other, and dates and times that
+  don't exist. The edited file is read back the same way before anything is backed up or written.
+- **Backup, then an atomic write.** The original is copied to MacMCP's own support folder,
+  `~/Library/Application Support/MacMCP/client-backups/` (mode 0700, files 0600), as
+  `<client>-<yyyymmdd-hhmmss>-<file>`, for example `cursor-20261029-101500-mcp.json`; the path is printed. That folder is
+  protected from agents (see [Policy and security](policy-and-security.md)), unlike a copy beside the config, which would
+  hold every server's `env`. Backups are never overwritten or deleted. The new file is written beside the config and
+  renamed over it. The backup and the temporary file are created exclusively (`O_CREAT|O_EXCL|O_NOFOLLOW`, with a new
+  name on a collision) relative to a pinned folder descriptor, so a planted link is never followed. A symlinked config is
+  followed on purpose, so the link stays. The temporary file gets the original's owner, group, mode and ACL; if they
+  can't be kept, nothing is replaced.
+- **A client saving at the same time.** The file is read again right before the rename; if it changed, nothing is
+  written and the command says to run it again. After the rename it's read back. If the result is wrong, the original is
+  put back only while the file still holds exactly what was written; if something else saved meanwhile, that version is
+  left alone and reported. A rollback that fails is reported as a failure, with the backup path and what the file now
+  holds. **Clients don't lock their configs**, so a save in the instant between the last check and the rename can still be
+  lost. Quit the client first (the command says so); that is the only complete protection.
+- **`--dry-run`** prints the lines that would change and writes nothing. For Claude Code and Codex with their CLIs it prints the commands.
 - **A missing folder** (`~/.cursor`, say) means the client isn't installed, so it's an error unless you pass `--create`.
 - Setting an entry that's already there changes nothing and makes no backup. `uninstall` of an entry that isn't there is a no-op.
 
-With the `claude` CLI, `install` runs `claude mcp add --scope user -- …`; if the name already exists it runs `claude mcp
-remove --scope user` first. Claude Code makes its own backups of `~/.claude.json`. If it isn't on `PATH`, the file is edited
-as above; quit open Claude Code sessions first, since one that saves its settings afterwards can undo the edit.
+With the `claude` CLI, `install` runs `claude mcp add --scope user …`. If the name already exists, the entry is first read
+from `~/.claude.json`, saved as JSON in the backup folder (the path is printed before anything is removed), then
+`claude mcp remove --scope user -- <name>` and `add` run. If the add fails, times out or is interrupted, the saved entry is
+put back with `claude mcp add-json --scope user -- <name> <json>` and checked; if that fails too, the error gives the exact
+command to run (`… "$(cat <saved file>)"`; the JSON isn't printed because it may hold credentials). An existing entry
+that can't be read is never removed. Claude Code makes its own backups of `~/.claude.json`. If `claude` isn't on `PATH`,
+the file is edited as above.
+
+With the `codex` CLI on `PATH`, a new entry is added with `codex mcp add <name> -- <command> …` and an existing one removed
+with `codex mcp remove -- <name>`, after the file has passed the TOML checks above. Replacing an entry that exists edits
+the file, so that it gets the backup and rollback.
 
 Agents can't do any of this: `ProtectedPaths` refuses them the AI clients' config files (see
 [Policy and security](policy-and-security.md)). The CLI is run by a person in Terminal and doesn't go

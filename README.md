@@ -114,8 +114,11 @@ mac-mcp uninstall --client claude-code
 ```
 
 This adds a server called `mac` (`--name` to change it) to the client's user config. Claude Code is registered with
-`claude mcp add` when `claude` is on your `PATH`. The other configs are edited in place: only the MacMCP entry changes,
-the original is copied to `<file>.macmcp-backup-<time>` first, and a file that doesn't parse is left alone. See
+`claude mcp add` when `claude` is on your `PATH`, and Codex with `codex mcp add` for a new entry. The other configs are
+edited in place: only the MacMCP entry changes, the original is copied to
+`~/Library/Application Support/MacMCP/client-backups/` first (the path is printed; agents can't open that folder), and a
+file that doesn't parse is left alone. **Quit the client first**: clients don't lock their configs, so one that saves its
+settings later can undo the change, and `mac-mcp` stops if it sees the file change underneath it. See
 [Registering clients](docs/architecture.md#registering-clients). Or by hand:
 
 ```bash

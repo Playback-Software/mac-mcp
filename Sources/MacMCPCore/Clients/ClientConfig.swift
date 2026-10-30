@@ -109,15 +109,30 @@ public struct ClientConfigError: Error, CustomStringConvertible {
 
 /// Reads and edits one client's config file.
 public enum ClientConfig {
-    /// Server names the clients accept everywhere.
+    /// Server names every client accepts: letters, digits, `_`, `.` and `-` (up to 64), and not starting with `-` so
+    /// that a client's CLI never reads a name as an option.
     public static func validate(name: String) throws {
-        guard name.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
-            throw ClientConfigError("`\(name)` isn't a usable server name: use letters, digits, - and _ (up to 64)")
+        guard name.range(of: "^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63}$", options: .regularExpression) != nil, !name.allSatisfy({ $0 == "." }) else {
+            throw ClientConfigError("`\(name)` isn't a usable server name: use letters, digits, - _ and . (up to 64), not starting with -")
         }
     }
 
-    /// `data` after adding `entry` (or, with nil, removing the entry) for `name`. Pure: no files are touched.
+    /// `data` after adding `entry` (or, with nil, removing the entry) for `name`. Pure: no files are touched. The result
+    /// is read back before it's returned, so an edit that doesn't leave exactly the entry wanted is never written.
     static func edit(_ client: McpClient, name: String, entry: ServerEntry?, original: Data?) throws -> (data: Data, change: ClientChange) {
+        let edited = try rawEdit(client, name: name, entry: entry, original: original)
+        do {
+            let found = edited.change == .unchanged ? entry : try registered(client, name: name, in: edited.data)
+            guard found == entry else {
+                throw ConfigFormatError(description: "the edited file doesn't hold exactly the entry wanted")
+            }
+        } catch let error as ConfigFormatError {
+            throw ClientConfigError("\(error.description). Nothing was changed.")
+        }
+        return edited
+    }
+
+    private static func rawEdit(_ client: McpClient, name: String, entry: ServerEntry?, original: Data?) throws -> (data: Data, change: ClientChange) {
         do {
             if let layout = client.jsonLayout {
                 if let entry {
@@ -164,9 +179,25 @@ public struct ClientPlan: Sendable {
     public let updated: Data
     let entry: ServerEntry?
     let createFolder: Bool
+    /// The home folder whose support folder holds the backup.
+    let home: String
 
     /// The lines that change, with a little context.
     public var diff: String { LineDiff.render(old: original.map { String(decoding: $0, as: UTF8.self) } ?? "", new: String(decoding: updated, as: UTF8.self)) }
+}
+
+/// Seams for tests to act between the steps of `ClientConfig.apply`, as a client saving its config would.
+struct ApplyHooks: Sendable {
+    /// After the temporary file is ready and before the file is read again and replaced.
+    var beforeRename: (@Sendable () -> Void)?
+    /// After the rename, before the result is checked.
+    var afterRename: (@Sendable () -> Void)?
+    /// Replaces the check that the written file holds the entry.
+    var check: (@Sendable (ClientPlan) throws -> Bool)?
+    /// Names to try for the temporary file, by attempt; nil means a random name.
+    var temporaryName: (@Sendable (Int) -> String?)?
+
+    static let none = ApplyHooks()
 }
 
 extension ClientConfig {
@@ -190,73 +221,167 @@ extension ClientConfig {
                     + "Run it once, or pass --create to make the folder and the file anyway.")
             }
         }
-        if original == nil, entry == nil { return ClientPlan(client: client, name: name, path: path, change: .unchanged, original: nil, updated: Data(), entry: nil, createFolder: false) }
+        if original == nil, entry == nil {
+            return ClientPlan(client: client, name: name, path: path, change: .unchanged, original: nil, updated: Data(), entry: nil,
+                              createFolder: false, home: environment.home)
+        }
         let edited = try edit(client, name: name, entry: entry, original: original)
         return ClientPlan(client: client, name: name, path: path, change: edited.change, original: original, updated: edited.data,
-                          entry: entry, createFolder: createFolder)
+                          entry: entry, createFolder: createFolder, home: environment.home)
     }
 
-    /// Writes a plan: copies the original aside first, replaces the file in one step, then reads it back and puts the
-    /// original back if the result isn't what the plan said. Returns the backup's path, if there was a file to back up.
+    /// Writes a plan. In order:
+    /// 1. reads the file again and refuses if it isn't what the plan was made from;
+    /// 2. copies it to the backup folder (`ClientBackups`);
+    /// 3. writes the new contents to a temporary file beside it, with the original's owner, group, mode and ACL, and
+    ///    refuses if those can't be kept;
+    /// 4. reads the file once more right before the rename and refuses if a client saved meanwhile;
+    /// 5. renames the temporary file over it (for a new file, only if still nothing is there), and reads it back.
+    /// If the read-back isn't right, the original is put back, but only while the file still holds exactly what was
+    /// written: a newer save by the client is left alone and reported. Returns the backup's path, if there was a file.
+    ///
+    /// Clients don't lock their configs, so a save in the instant between step 4 and the rename can still be lost.
+    /// Quitting the client first is the only complete protection.
     @discardableResult
     public static func apply(_ plan: ClientPlan, now: Date = Date()) throws -> String? {
+        try apply(plan, now: now, hooks: .none)
+    }
+
+    static func apply(_ plan: ClientPlan, now: Date, hooks: ApplyHooks) throws -> String? {
         guard plan.change != .unchanged else { return nil }
-        let fm = FileManager.default
-        let url = URL(fileURLWithPath: plan.path)
-        let current = fm.contents(atPath: plan.path)
-        guard current == plan.original else {
-            throw ClientConfigError("\(plan.path) changed while mac-mcp was working on it; nothing was written. Run the command again.")
-        }
-        let attributes = try? fm.attributesOfItem(atPath: plan.path)
-        let permissions = (attributes?[.posixPermissions] as? NSNumber)?.intValue ?? 0o600
-        var backup: String?
+        let folderPath = (plan.path as NSString).deletingLastPathComponent
+        let fileName = (plan.path as NSString).lastPathComponent
+        let shown = ClientInstaller.display(plan.path, home: plan.home)
+        let changed = ClientConfigError("\(shown) changed while mac-mcp was working on it; nothing was written. "
+            + "Quit \(plan.client.displayName) and run the command again.")
+        if plan.original == nil, plan.createFolder { try? FileManager.default.createDirectory(atPath: folderPath, withIntermediateDirectories: true) }
+        let folder = try PinnedDirectory(path: folderPath)
+
+        // 1. The file as it is now.
+        let originalFile = try folder.openFile(fileName)
+        defer { if let originalFile { close(originalFile) } }
+        let current = try originalFile.map { try ClientFiles.readAll($0, describing: shown) }
+        guard current == plan.original else { throw changed }
+
+        // 2. The backup.
+        var backup: (path: String, name: String, folder: PinnedDirectory)?
         if let original = plan.original {
-            let path = backupPath(for: plan.path, now: now)
-            guard fm.createFile(atPath: path, contents: original, attributes: [.posixPermissions: permissions]),
-                  fm.contents(atPath: path) == original else { throw ClientConfigError("cannot write a backup to \(path); nothing was changed") }
-            backup = path
-        } else if plan.createFolder {
-            try? fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            backup = try ClientBackups.write(original, client: plan.client, label: fileName, home: plan.home, now: now)
         }
+        func abandonBackup() { if let backup { backup.folder.remove(backup.name) } }
+
+        // 3. The new contents, beside the file.
+        let temporary: (name: String, fd: Int32)
         do {
-            try replace(plan.path, with: plan.updated, permissions: permissions)
-            guard fm.contents(atPath: plan.path) == plan.updated, try check(plan) else {
-                throw ClientConfigError("the file read back differently from what was written")
+            temporary = try folder.createExclusive(mode: 0o600) { attempt in
+                hooks.temporaryName?(attempt) ?? ".\(fileName).macmcp-\(UUID().uuidString.prefix(8)).tmp"
+            }
+        } catch { abandonBackup(); throw error }
+        var temporaryOpen = true
+        func closeTemporary() { if temporaryOpen { close(temporary.fd); temporaryOpen = false } }
+        func discardTemporary() { closeTemporary(); folder.remove(temporary.name) }
+        var written = stat()
+        do {
+            try ClientFiles.writeAll(temporary.fd, plan.updated, describing: temporary.name)
+            if let originalFile { try ClientFiles.copySecurity(from: originalFile, to: temporary.fd) }
+            guard fsync(temporary.fd) == 0, fstat(temporary.fd, &written) == 0 else {
+                throw ClientConfigError("cannot write \(temporary.name): \(ClientFiles.reason())")
             }
         } catch {
-            if let original = plan.original { try? replace(plan.path, with: original, permissions: permissions) } else { try? fm.removeItem(atPath: plan.path) }
-            throw ClientConfigError("writing \(plan.path) failed (\(error)); the original was put back" + (backup.map { " (a copy is at \($0))" } ?? ""))
+            discardTemporary(); abandonBackup()
+            throw ClientConfigError("\(error); \(shown) was not changed")
         }
-        return backup
+        closeTemporary()
+
+        // 4. Once more, right before the rename.
+        hooks.beforeRename?()
+        let latest: Data?
+        do { latest = try folder.read(fileName)?.data } catch { discardTemporary(); abandonBackup(); throw error }
+        guard latest == plan.original else { discardTemporary(); abandonBackup(); throw changed }
+
+        // 5. The rename.
+        if let code = folder.rename(temporary.name, to: fileName, replacing: plan.original != nil) {
+            discardTemporary(); abandonBackup()
+            if code == EEXIST { throw changed }
+            throw ClientConfigError("cannot replace \(shown): \(ClientFiles.reason(code)); it was not changed")
+        }
+        hooks.afterRename?()
+        guard let landed = try? folder.read(fileName), landed.data == plan.updated, landed.info.st_ino == written.st_ino else {
+            // It isn't what was written: another program saved right after the rename. Its version stays.
+            throw ClientConfigError("\(shown) was changed by something else right after mac-mcp wrote it, so mac-mcp left it as it is "
+                + "and did not put the original back. Check that it still has \"\(plan.name)\""
+                + (backup.map { "; the original is saved at \(ClientInstaller.display($0.path, home: plan.home))" } ?? "")
+                + ". Quit \(plan.client.displayName) and run the command again.")
+        }
+        let ok: Bool
+        do { ok = try hooks.check?(plan) ?? check(plan) } catch { ok = false }
+        if ok { return backup?.path }
+
+        // The write is wrong. Put the original back, if the file is still exactly what was written.
+        let outcome = rollback(plan, folder: folder, fileName: fileName, originalFile: originalFile, written: written, hooks: hooks)
+        let tail = backup.map { " The original is saved at \($0.path)." } ?? ""
+        switch outcome {
+        case .restored:
+            throw ClientConfigError("the file read back differently from what was written; the original was put back and checked." + tail)
+        case let .left(state):
+            throw ClientConfigError("the file read back differently from what was written, and the original could NOT be put back: \(state)." + tail
+                + (plan.original != nil ? " To restore it yourself, quit \(plan.client.displayName) and copy the saved file over \(plan.path)." : ""))
+        }
+    }
+
+    private enum Rollback { case restored, left(String) }
+
+    /// Puts the original back (or removes a file that is new), but only while the file is still the one we wrote.
+    /// Everything is checked: what is reported is what the file holds afterwards.
+    private static func rollback(_ plan: ClientPlan, folder: PinnedDirectory, fileName: String, originalFile: Int32?, written: stat,
+                                 hooks: ApplyHooks) -> Rollback {
+        func state() -> String {
+            guard let now = try? folder.read(fileName) else { return folder.exists(fileName) ? "the file can't be read" : "the file is missing" }
+            if now.data == plan.original { return "the file holds the original contents" }
+            if now.data == plan.updated { return "the file still holds the new contents mac-mcp wrote" }
+            return "the file holds contents that are neither the original nor what mac-mcp wrote"
+        }
+        func stillOurs() -> Bool {
+            guard let now = try? folder.read(fileName) else { return false }
+            return now.data == plan.updated && now.info.st_ino == written.st_ino
+        }
+        guard stillOurs() else {
+            return .left("it was changed by something else since, so mac-mcp left it alone; " + state())
+        }
+        guard let original = plan.original, let originalFile else {
+            // A file that didn't exist before: take it away.
+            folder.remove(fileName)
+            if !folder.exists(fileName) { return .restored }
+            return .left("removing it failed; " + state())
+        }
+        var restoring: (name: String, fd: Int32)?
+        do {
+            let created = try folder.createExclusive(mode: 0o600) { _ in ".\(fileName).macmcp-restore-\(UUID().uuidString.prefix(8)).tmp" }
+            restoring = created
+            try ClientFiles.writeAll(created.fd, original, describing: created.name)
+            try ClientFiles.copySecurity(from: originalFile, to: created.fd)
+            guard fsync(created.fd) == 0 else { throw ClientConfigError("cannot write \(created.name): \(ClientFiles.reason())") }
+            close(created.fd)
+            restoring = (created.name, -1)
+            guard stillOurs() else { throw ClientConfigError("it was changed by something else just now, so mac-mcp left it alone") }
+            if let code = folder.rename(created.name, to: fileName, replacing: true) {
+                throw ClientConfigError("cannot rename over it: \(ClientFiles.reason(code))")
+            }
+            restoring = nil
+        } catch {
+            if let restoring {
+                if restoring.fd >= 0 { close(restoring.fd) }
+                folder.remove(restoring.name)
+            }
+            return .left("\(error); " + state())
+        }
+        guard (try? folder.read(fileName))?.data == original else { return .left("it didn't read back as the original; " + state()) }
+        return .restored
     }
 
     private static func check(_ plan: ClientPlan) throws -> Bool {
         let found = try registered(plan.client, name: plan.name, in: plan.updated)
         return plan.entry.map { found == $0 } ?? (found == nil)
-    }
-
-    static func backupPath(for path: String, now: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let base = path + ".macmcp-backup-" + formatter.string(from: now)
-        var candidate = base
-        var n = 1
-        while FileManager.default.fileExists(atPath: candidate) { n += 1; candidate = "\(base)-\(n)" }
-        return candidate
-    }
-
-    /// Writes `data` to a sibling file and renames it over `path`, so a reader never sees half a file.
-    private static func replace(_ path: String, with data: Data, permissions: Int) throws {
-        let temporary = (path as NSString).deletingLastPathComponent + "/.macmcp-\(UUID().uuidString.prefix(8)).tmp"
-        guard FileManager.default.createFile(atPath: temporary, contents: data, attributes: [.posixPermissions: permissions]) else {
-            throw ClientConfigError("cannot write \(temporary)")
-        }
-        if rename(temporary, path) != 0 {
-            let reason = String(cString: strerror(errno))
-            try? FileManager.default.removeItem(atPath: temporary)
-            throw ClientConfigError("cannot replace \(path): \(reason)")
-        }
     }
 }
 
