@@ -83,7 +83,8 @@ if [[ -z "$IDENTITY" ]]; then
   fi
   IDENTITY=${found%% *}
 fi
-VERSION=0.1.1
+VERSION=$(tr -d '[:space:]' < VERSION)   # the one place the version is set; Sources/mac-mcp/main.swift must match (a unit test checks)
+[[ "$VERSION" == [0-9]*.[0-9]*.[0-9]* ]] || { print -u2 "build.sh: VERSION holds '$VERSION', not a version like 0.1.1."; exit 1 }
 BUILD="$(git rev-parse --short HEAD 2>/dev/null || echo dev)$(git diff --quiet HEAD 2>/dev/null || echo +dirty)-$(date +%Y%m%d%H%M%S)"
 
 swift build -c release --product MacMCPAgent
