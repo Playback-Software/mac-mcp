@@ -87,9 +87,8 @@ private func perform(
         let settle = await Settle.wait(pid: pid)
         // A successful action can close the final window (Escape in an Open panel, a close button, cmd+w).
         let after = try await actionSnapshot(req, allowMenubar: true)
-        let out = report(summary: summary.text, settle: settle, before: before, after: after)
-        await RefStore.shared.markShown(out.shownRows)
-        return .text(out.text, auditDetail: actionAudit(resolved, app: app, summary))
+        let text = await actionReport(summary: summary.text, settle: settle, before: before, after: after)
+        return .text(text, auditDetail: actionAudit(resolved, app: app, summary))
     } catch {
         return .error("\(error)", audit: (error as? ActionError)?.audit)
     }
@@ -147,10 +146,16 @@ func targetRefusal(_ r: Resolved, checkedPid pid: pid_t, policy: Policy) -> Stri
 /// shows, as rendered, so `RefStore` can remember the labels the agent has now seen. `summary` is the tool's
 /// sentence; screen text in it (a label, a tooltip) is already marked inline. Everything below it is read from the
 /// screen and goes in one marked block.
+func actionReport(summary: String, settle: Settle.Result, before: SnapshotResult, after: SnapshotResult,
+                  refs: RefStore = .shared) async -> String {
+    let out = report(summary: summary, settle: settle, before: before, after: after)
+    await refs.markShown(out.shownRows)
+    return out.text
+}
+
 func report(summary: String, settle: Settle.Result, before: SnapshotResult, after: SnapshotResult) -> (text: String, shownRows: [Row]) {
     let head = summary + (settle.settled ? " · settled in \(settle.milliseconds) ms" : " · UI still changing after \(settle.milliseconds) ms")
     var lines: [String] = []
-    lines += after.lines.prefix(2)   // header + blockers
     if let front = Apps.frontmost(), front.pid != after.app.pid {
         lines.append("note: the frontmost app is now \(front.label); snapshot it with app=\"\(front.name)\"")
     }
@@ -176,8 +181,11 @@ func report(summary: String, settle: Settle.Result, before: SnapshotResult, afte
                 + "so rows that disappeared aren't listed; take mac_snapshot to confirm the state")
         }
         let shown = Set(diff.refs)
-        shownRows = after.rows.filter { $0.ref.map(shown.contains) ?? false }
+        let afterRefs = Set(after.rows.compactMap(\.ref))
+        shownRows = (after.rows + before.rows.filter { $0.ref.map { !afterRefs.contains($0) } ?? false })
+            .filter { $0.ref.map(shown.contains) ?? false }
     }
+    lines = after.headerLines(showing: shownRows) + lines
     return (head + "\n" + Untrusted.wrap(lines: lines), shownRows)
 }
 

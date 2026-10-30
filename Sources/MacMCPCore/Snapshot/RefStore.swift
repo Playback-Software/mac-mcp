@@ -166,7 +166,7 @@ public actor RefStore {
     /// non-empty label that matches is accepted from an uncertain read: the read did deliver the name.
     public static func changeMessage(ref: String, role: String, shown: Shown?, label: String, identifier: String?,
                                      complete: Bool = true) -> String? {
-        guard let shown else { return nil }   // never rendered to the agent: nothing it could have relied on
+        guard let shown else { return nil }   // Actions.resolve refuses never-shown refs before checking for changes
         let retake = "Take a new mac_snapshot."
         let uncertain = "\(ref) couldn't be fully re-read, so it may not be what was shown. \(retake)"
         if let was = shown.identifier {
