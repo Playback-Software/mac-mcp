@@ -28,6 +28,16 @@ Queries search complete sanitized labels and values, even when their displayed r
 until=gone` requires an accessibility walk that read every element's text; a loading or truncated tree, or one where
 a label, value or child list failed to read, cannot prove a target disappeared (a failed identifier read alone
 doesn't hold it up).
+
+`mac_snapshot` defaults to a 1500-token row budget (`max_tokens`). When an overview exceeds it, static text and
+headings yield to controls. Within each kind, the focused element and nearby rows, then the top and bottom rows,
+get priority; output stays in tree order. Repeated table/list rows with the same role and shape show the first few,
+the last, and rows around focus, with `… N more rows like this (use query= or scroll)` for collapsed runs. The final
+note counts all unshown rows, including collapsed rows and their controls. Use `query=` or a narrower `scope=` to
+find them, or raise `max_tokens`; for offscreen elements, scroll or use `offscreen=true`. Query results retain their
+matching order and prefix budget, without repetition folding. Unshown controls keep their refs across snapshots,
+and action diffs still compare all rows read from the UI.
+
 For canvas text, for example, use `mac_wait app="My App" until=text query="Ready" ocr=true timeout=30`. OCR waits
 need Screen Recording, poll the app's visible window, and return recognized text with screenshot click points.
 They support appearance checks only, since recognition errors cannot reliably prove text is absent. The first
