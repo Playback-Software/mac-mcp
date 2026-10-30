@@ -166,6 +166,8 @@ private final class SyntheticTree: Sendable {
         #expect(!whole.matches(root, options: menus))
         var smaller = Walker.Options(); smaller.maxNodes = 10
         #expect(!whole.matches(root, options: smaller))
+        #expect(whole.matches(root, options: Walker.Options()))
+        #expect(!whole.matches(root, options: Walker.Options(), now: .now + Walker.Capture.maxAge), "a walk too old to trust")
     }
 
     @Test func settleOffersOnlyItsLastSampleAndNeverAnUnsettledWalk() async {

@@ -68,18 +68,23 @@ public enum Walker {
         let descendMenus: Bool
         let tree: RawNode
         let stats: WalkStats
+        let taken: ContinuousClock.Instant
+        /// A walk older than this may miss a change made after settle (a sheet dismissed in between), so it's taken anew.
+        static let maxAge: Duration = .milliseconds(500)
 
-        init(root: AXElement, options: Options, tree: RawNode, stats: WalkStats) {
+        init(root: AXElement, options: Options, tree: RawNode, stats: WalkStats, taken: ContinuousClock.Instant = .now) {
             self.root = root
             clip = options.clip
             descendMenus = options.descendMenus
             self.tree = tree
             self.stats = stats
+            self.taken = taken
         }
 
-        func matches(_ root: AXElement, options: Options) -> Bool {
+        func matches(_ root: AXElement, options: Options, now: ContinuousClock.Instant = .now) -> Bool {
             self.root == root && tree.element == root && clip == options.clip && descendMenus == options.descendMenus
                 && stats.complete && stats.textComplete && stats.visited <= options.maxNodes
+                && taken.duration(to: now) < Self.maxAge
         }
     }
 

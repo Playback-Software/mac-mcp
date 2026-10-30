@@ -86,6 +86,8 @@ class Client:
         text = "\n".join(c.get("text", "") for c in result.get("content", []) if c.get("type") == "text")
         if result.get("isError"):
             raise RuntimeError(f"{tool} failed: {text}")
+        if "the frontmost app is now" in text:
+            raise RuntimeError(f"{tool} left MacMCPTestHost: another app came to the front. Close it and rerun")
         return text, elapsed_ms
 
     def close(self) -> None:
@@ -117,8 +119,8 @@ class Metrics:
                     continue
                 if record.get("isError") or record.get("inFlightWalks", 0):
                     raise RuntimeError(f"{tool} metrics include an error or unfinished accessibility work")
-                if record.get("walks", 0) < 1 or "settle" not in record.get("phases", {}):
-                    raise RuntimeError(f"{tool} metrics have no walks or settle phase")
+                if record.get("walks", 0) < 1 or not record.get("phases", {}).get("settle", {}).get("milliseconds"):
+                    raise RuntimeError(f"{tool} metrics have no walks or no settle time")
                 return record
             time.sleep(0.02)
         raise RuntimeError("No action metrics found. Start the agent with MAC_MCP_DEBUG_ACTIONS=1; "
