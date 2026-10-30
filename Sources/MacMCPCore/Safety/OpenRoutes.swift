@@ -208,6 +208,7 @@ public enum OpenRoutes {
 
     static func openingRefusal(url: URL, policy: Policy, roots: ProtectedPaths.Roots?) -> String? {
         guard url.isFileURL else { return nil }
+        let roots = roots ?? ProtectedPaths.Roots()
         if let r = ProtectedPaths.firstRefusal([url.path], roots: roots) { return r }
         if isAppBundle(url) { return policy.refusal(appAt: url) }
         if isPlainFolder(url) { return nil }

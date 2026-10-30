@@ -168,6 +168,17 @@ import Testing
         #expect(try OCR.fingerprint(image) == OCR.fingerprint(render([("Same", CGPoint(x: 40, y: 40))])))
         #expect(try OCR.fingerprint(image) != OCR.fingerprint(touched(image)))
         #expect(try OCR.fingerprint(image) != OCR.fingerprint(render([("Same", CGPoint(x: 40, y: 40))], size: CGSize(width: 601, height: 240))))
+        // The same bytes read through another color space or a decode array look different, so they never match.
+        func reinterpreted(_ space: CGColorSpace, decode: [CGFloat]?) -> CGImage? {
+            CGImage(width: image.width, height: image.height, bitsPerComponent: image.bitsPerComponent,
+                    bitsPerPixel: image.bitsPerPixel, bytesPerRow: image.bytesPerRow, space: space,
+                    bitmapInfo: image.bitmapInfo, provider: image.dataProvider!, decode: decode,
+                    shouldInterpolate: false, intent: .defaultIntent)
+        }
+        let p3 = try #require(reinterpreted(CGColorSpace(name: CGColorSpace.displayP3)!, decode: nil))
+        #expect(try OCR.fingerprint(image) != OCR.fingerprint(p3))
+        let inverted = try #require(reinterpreted(image.colorSpace!, decode: [1, 0, 1, 0, 1, 0]))
+        #expect(throws: (any Error).self) { try OCR.fingerprint(inverted) }
     }
 
     @Test func memoSkipsRecognitionOnlyForUnchangedFrames() throws {

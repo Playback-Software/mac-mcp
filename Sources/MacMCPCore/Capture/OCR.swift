@@ -62,7 +62,7 @@ public enum OCR {
         public var reused: Int { state.withLock { $0.reused } }
 
         func lines(for image: CGImage, accurate: Bool, recognize: () throws -> [Line]) throws -> [Line] {
-            let fingerprint = try OCR.fingerprint(image)
+            guard let fingerprint = try? OCR.fingerprint(image) else { return try recognize() }
             let hit: [Line]? = state.withLock { s in
                 guard let last = s.last, last.fingerprint == fingerprint, last.accurate == accurate else { return nil }
                 s.reused += 1
@@ -75,13 +75,15 @@ public enum OCR {
         }
     }
 
-    /// SHA-256 of the frame's size, format and visible pixels (row padding left out). Identical pixels recognize
-    /// identically, so equal fingerprints let a wait reuse the last result; a changed pixel changes it.
+    /// SHA-256 of the frame's size, format, color interpretation and visible pixels (row padding left out). Identical
+    /// pixels read the same way recognize identically, so equal fingerprints let a wait reuse the last result; a
+    /// changed pixel changes it. An image with a decode array has none, so Vision always reads it.
     static func fingerprint(_ image: CGImage) throws -> SHA256.Digest {
-        guard let data = image.dataProvider?.data else { throw ActionError("Not an image.") }
+        guard let data = image.dataProvider?.data, image.decode == nil else { throw ActionError("Not an image.") }
         var hasher = SHA256()
-        let header = [image.width, image.height, image.bitsPerPixel, Int(image.bitmapInfo.rawValue)]
+        let header = [image.width, image.height, image.bitsPerPixel, image.bitsPerComponent, Int(image.bitmapInfo.rawValue)]
         header.withUnsafeBytes { hasher.update(bufferPointer: $0) }
+        hasher.update(data: Data((image.colorSpace?.name as String? ?? "").utf8))
         let rowBytes = (image.width * image.bitsPerPixel + 7) / 8
         let stride = image.bytesPerRow
         let total = CFDataGetLength(data)
