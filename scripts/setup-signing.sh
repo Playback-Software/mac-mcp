@@ -8,6 +8,8 @@
 #
 # Uses MAC_MCP_SIGNING_KEYCHAIN and MAC_MCP_SIGNING_KEYCHAIN_PASS when set, like build.sh.
 set -euo pipefail
+source "${0:A:h}/toolchain.sh"
+require_toolchain setup-signing.sh
 KC="${MAC_MCP_SIGNING_KEYCHAIN:-$HOME/Library/Keychains/mac-mcp-signing.keychain-db}"
 KC_PASS="${MAC_MCP_SIGNING_KEYCHAIN_PASS:-$HOME/.config/mac-mcp/signing-keychain.pass}"
 NAME="MacMCP Local Development"

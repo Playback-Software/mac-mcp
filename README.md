@@ -92,9 +92,10 @@ mac-mcp doctor             # check permissions and the session
 The CLI is installed in `~/.local/bin`; add it to your `PATH` or use the full path.
 
 macOS ties permission grants to the signing certificate, so MacMCP needs one that stays the same across builds.
-`setup-signing.sh` creates a self-signed one, or imports yours with `--import`. If you already have an Apple Development
-certificate in your login keychain, `build.sh` uses it from a local Terminal without this step. See
-[Signing](docs/architecture.md#signing).
+`setup-signing.sh` creates a self-signed one, or imports yours with `--import`. If your login keychain has exactly one
+valid code-signing identity, such as an Apple Development certificate from Xcode, `build.sh` uses it from a local
+Terminal without this step. With several, it stops and lists them; set `MAC_MCP_SIGNING_IDENTITY` to the SHA-1 of the one
+you want. See [Signing](docs/architecture.md#signing).
 
 On first launch macOS asks you to grant **MacMCP** *Accessibility* (shown as "Device Control" on macOS 27) and
 *Screen & System Audio Recording*. Approve both, then run `mac-mcp doctor` until everything reads `OK`.
@@ -107,6 +108,43 @@ claude mcp add mac -- ssh you@your-mac /Users/you/.local/bin/mac-mcp
 ```
 
 `mac-mcp remote-setup` checks this Mac and prints the exact commands for another machine.
+
+### A first task
+
+Once the client is connected, give it something small and read-only:
+
+> Use the mac tools to list the running apps, then snapshot the frontmost window and tell me what's on screen.
+
+Then something that acts:
+
+> Open Calculator, work out 17 × 23 and tell me what it shows.
+
+If a call is refused, `mac-mcp doctor` and the tool's reply say why; [Policy and security](docs/policy-and-security.md)
+covers the defaults.
+
+## Updating
+
+```bash
+git pull
+scripts/build.sh           # builds, swaps the install in and rolls back if the new agent doesn't answer
+mac-mcp doctor
+```
+
+Permissions carry over while the signing certificate stays the same. `build.sh` won't replace the agent while another
+client holds the GUI lease. See the [changelog](CHANGELOG.md) for what changed between releases.
+
+## Uninstalling
+
+```bash
+mac-mcp uninstall --purge   # stops the agent, removes its LaunchAgent, ~/Applications/MacMCP.app and its support folder
+rm ~/.local/bin/mac-mcp
+```
+
+`--purge` also deletes the approved-policy records from your login keychain (macOS may ask for its password).
+Without it, only the LaunchAgent is removed. Neither touches `~/.config/mac-mcp` (your policy), `~/Library/Logs/MacMCP`
+(logs and the audit log) or the signing keychain `~/Library/Keychains/mac-mcp-signing.keychain-db`; delete those yourself
+if you want them gone. Remove MacMCP from System Settings ▸ Privacy & Security ▸ Accessibility and Screen & System Audio
+Recording, and from your MCP client (`claude mcp remove mac`).
 
 ## Safety
 
@@ -140,6 +178,8 @@ Early development: tools and policy keys may still change before 1.0.
 | [Architecture](docs/architecture.md) | Agent and relay design, protocol layer, web tools, health checks, GUI sharing, signing |
 | [Policy and security](docs/policy-and-security.md) | `policy.json` options and the security model |
 | [Development and testing](docs/testing/development.md) | Unit, integration and soak tests, the TestHost app, and the agent task suite |
+| [Contributing](CONTRIBUTING.md) | Building, testing, linting and style |
+| [Changelog](CHANGELOG.md) | What changed in each release |
 
 ## License
 

@@ -17,6 +17,7 @@
 set -euo pipefail
 cd "${0:A:h}/.."
 source "${0:A:h}/toolchain.sh"
+require_toolchain build.sh
 source "${0:A:h}/install-swap.zsh"
 
 APP="$HOME/Applications/MacMCP.app"
@@ -31,6 +32,14 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 install_lock || exit 1
 recover_install || exit 1
+
+# The CLI is installed outside the default PATH on a fresh Mac.
+path_hint() {
+  [[ ":$PATH:" == *":${CLI:h}:"* ]] && return 0
+  print "note: ${CLI:h} is not on your PATH, so \`mac-mcp\` isn't found by name yet."
+  print "  To add it for zsh: echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc, then open a new terminal."
+  print "  Until then, check the install with: $CLI doctor"
+}
 
 # Exits when someone else holds the GUI lease. Uses the installed CLI, the one that knows about the lease.
 check_lease() {
@@ -83,7 +92,8 @@ if [[ -z "$IDENTITY" ]]; then
   fi
   IDENTITY=${found%% *}
 fi
-VERSION=0.1.1
+VERSION=$(tr -d '[:space:]' < VERSION)   # the one place the version is set; Sources/mac-mcp/main.swift must match (a unit test checks)
+[[ "$VERSION" == [0-9]*.[0-9]*.[0-9]* ]] || { print -u2 "build.sh: VERSION holds '$VERSION', not a version like 0.1.1."; exit 1 }
 BUILD="$(git rev-parse --short HEAD 2>/dev/null || echo dev)$(git diff --quiet HEAD 2>/dev/null || echo +dirty)-$(date +%Y%m%d%H%M%S)"
 
 swift build -c release --product MacMCPAgent
@@ -152,6 +162,7 @@ swap_in || exit 1
 
 if [[ "${1:-}" == "--no-start" ]]; then
   commit_install   # the running agent is untouched, so there is nothing to fall back to yet
+  path_hint
   exit 0
 fi
 
@@ -176,6 +187,7 @@ agent_healthy() {
 
 if "$CLI" install && agent_healthy; then
   commit_install
+  path_hint
   exit 0
 fi
 
