@@ -125,8 +125,9 @@ may be shown. It asks nothing to read an item's attributes or to add a new item.
   and it says how many. `mac-mcp policy prune` deletes them: it says how many records other builds made, and macOS
   then asks for your login keychain password once for each (enter it, or click Deny to keep that record). In normal
   use few stay: the agent's own (the first baseline, and tightenings) and those from before an upgrade.
-- The single item that MacMCP 0.1.0 kept (account `approved-policy`) is read like any other record, at sequence 0
-  if it has none. New records come after it, and `mac-mcp policy prune` deletes it.
+- MacMCP 0.1.0 approved nothing, so the first start after upgrading from it is a first run (see above).
+  Development builds from before 0.1.1 kept a single item (account `approved-policy`); it's read like any other
+  record, at sequence 0 if it has none. New records come after it, and `mac-mcp policy prune` deletes it.
 
 Each item's access list trusts MacMCP's own agent and CLI (matched by their code signature, so rebuilds signed with
 the same certificate qualify). Like the rest of the login keychain, the items don't stop software already running as
