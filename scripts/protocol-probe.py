@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import json, socket, os, sys
 SOCK = os.path.expanduser("~/Library/Application Support/MacMCP/mcp.sock")
 def session(lines, expect):
