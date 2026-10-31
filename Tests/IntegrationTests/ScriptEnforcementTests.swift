@@ -81,13 +81,15 @@ extension Integration {
     }
 
     @Test func additionsAddressedToAnAllowedAppAreStillRefused() async throws {
-        for command in ["system info", "path to home folder", "list disks"] {
+        // Bypass parent AX preflight so this verifies the addition's event-code refusal even when the runner
+        // lacks Accessibility. An absent document-gate socket must not be the reason these commands are refused.
+        for (command, refusal) in [("system info", "system info"), ("path to home folder", "path to"), ("list disks", "list disks")] {
             // Use a variable to avoid app terminology: the addition is still addressed to TextEdit at runtime.
             let source = "use scripting additions\nset target to application \"TextEdit\"\ntell target to " + command
             #expect(Scripts.refusal(source: source, language: .applescript, policy: policy) == nil)
             let result = try await runEventHost(source, language: .applescript, policy: policy)
             #expect(result.status != 0 && result.stdout.isEmpty)
-            #expect(result.stderr.contains("Refused Apple event"), "\(command): \(result.stderr)")
+            #expect(result.stderr.contains("Refused Apple event: \(refusal)."), "\(command): \(result.stderr)")
         }
     }
 

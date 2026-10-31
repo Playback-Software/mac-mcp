@@ -872,12 +872,114 @@ import Testing
     }
 
     @Test func documentGateRefusesWindowsMissingFromAXIncludingOtherSpaces() {
-        for count in [nil, 0, 2] as [Int?] {
-            #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: documentSource(windowCount: count)) == .unavailable)
+        for info in [nil, [serverWindow(id: 1), serverWindow(id: 2, onscreen: false)],
+                     [serverWindow(id: 2, bounds: CGRect(x: 0, y: 0, width: 500, height: 500))]] as [[[String: Any]]?] {
+            let source = documentSource(serverWindows: info.flatMap { ScriptDocuments.windowInventory(pid: 42, info: $0, displays: []) })
+            #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: source) == .unavailable)
         }
         let protected = FileManager.default.homeDirectoryForCurrentUser.path + "/.ssh/config"
         let source = documentSource(reads: [1: AXElement.Read(values: [kAXDocumentAttribute: protected])])
         #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: source) == .protected)
+    }
+
+    @Test func documentGateMatchesFinderAndTextEditWithoutBackingChrome() throws {
+        let display = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let chrome = [serverWindow(id: 10, bounds: CGRect(x: 0, y: 482, width: 64, height: 64), onscreen: false, title: "")]
+            + (11...14).map { serverWindow(id: CGWindowID($0), bounds: CGRect(x: 0, y: 0, width: 1512, height: 33), onscreen: false, title: "") }
+        let textEdit = try #require(ScriptDocuments.windowInventory(pid: 42, info: chrome + [serverWindow(id: 1)], displays: [display]))
+        #expect(textEdit.count == 1)
+        #expect(ScriptDocuments.snapshot(bundleID: "com.apple.TextEdit", source: documentSource(serverWindows: textEdit)).inventory == .init(pid: 42, tabsPerWindow: [0]))
+        let finderBounds = CGRect(x: 296, y: 141, width: 920, height: 436)
+        let finder = try #require(ScriptDocuments.windowInventory(pid: 42, info: chrome + [
+            serverWindow(id: 1, bounds: finderBounds), serverWindow(id: 2, bounds: display, layer: -2147483603, title: ""),
+        ], displays: [display]))
+        let source = documentSource(serverWindows: finder, windows: [1, 2], frames: [1: finderBounds], reads: [
+            1: .init(values: [:]), 2: .init(values: [kAXRoleAttribute: kAXScrollAreaRole]),
+        ])
+        #expect(ScriptDocuments.snapshot(bundleID: "com.apple.finder", source: source).inventory == .init(pid: 42, tabsPerWindow: [0, 0]))
+    }
+
+    @Test func documentGateMatchesMailSheetAndRefusesUnclassifiedOffscreenWindows() throws {
+        let main = CGRect(x: 226, y: 76, width: 1059, height: 688)
+        let sheet = CGRect(x: 521, y: 212, width: 470, height: 416)
+        let display = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let info = [serverWindow(id: 1, bounds: main), serverWindow(id: 2, bounds: sheet, title: "")]
+            + (3...6).map { serverWindow(id: CGWindowID($0), bounds: CGRect(x: 0, y: 0, width: 1512, height: 33), onscreen: false, title: "") }
+        var reads = [1: AXElement.Read(values: [kAXChildrenAttribute: [2]]), 2: .init(values: [kAXRoleAttribute: kAXSheetRole])]
+        let frames = [1: main, 2: sheet]
+        let checked = try #require(ScriptDocuments.windowInventory(pid: 42, info: info, displays: [display]))
+        #expect(checked.count == 2)
+        #expect(ScriptDocuments.snapshot(bundleID: "com.apple.mail", source: documentSource(serverWindows: checked, frames: frames, reads: reads)).inventory == .init(pid: 42, tabsPerWindow: [0]))
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        reads[2]?.values[kAXDocumentAttribute] = home + "/.ssh/config"
+        #expect(ScriptDocuments.check(bundleID: "com.apple.mail", source: documentSource(serverWindows: checked, frames: frames, reads: reads)) == .protected)
+        reads[2]?.values.removeValue(forKey: kAXDocumentAttribute)
+        // The live eight-window Mail shape has two more unnamed, unordered windows. Their metadata cannot prove
+        // that they are backing windows rather than hidden documents; exempting them would fail open.
+        let all = try #require(ScriptDocuments.windowInventory(pid: 42, info: info + [
+            serverWindow(id: 7, bounds: CGRect(x: 0, y: 482, width: 500, height: 500), onscreen: false, title: ""),
+            serverWindow(id: 8, bounds: CGRect(x: 100, y: 750, width: 100, height: 132), onscreen: false, title: ""),
+        ], displays: [display]))
+        #expect(all.count == 4)
+        #expect(ScriptDocuments.check(bundleID: "com.apple.mail", source: documentSource(serverWindows: all, frames: frames, reads: reads)) == .unavailable)
+    }
+
+    @Test func documentGateKeepsMinimizedHiddenAndOtherSpaceWindows() throws {
+        let other = CGRect(x: 50, y: 50, width: 586, height: 488)
+        // isOnscreen=false must not discard a real window, with or without a title. No Space switch is needed
+        // to test that omitting it from AX fails closed, while an AX-listed minimized/hidden window is checked.
+        for title in ["Document", ""] {
+            let checked = try #require(ScriptDocuments.windowInventory(pid: 42, info: [serverWindow(id: 1),
+                serverWindow(id: 2, bounds: other, onscreen: false, title: title)], displays: []))
+            #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: documentSource(serverWindows: checked)) == .unavailable)
+            let source = documentSource(serverWindows: checked, windows: [1, 2], frames: [1: documentFrame, 2: other],
+                                        reads: [1: .init(values: [:]), 2: .init(values: [kAXMinimizedAttribute: true])])
+            #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: source) == .safe)
+        }
+    }
+
+    @Test func documentGateRefusesAXErrorsTruncatedWalksAndCoincidentMissingWindows() {
+        for reads in [[:], [1: .init(values: [:], errors: [kAXDocumentAttribute: .cannotComplete])],
+                      [1: .init(values: [kAXChildrenAttribute: Array(2...514)])],
+                      Dictionary(uniqueKeysWithValues: (1...513).map { ($0, AXElement.Read(values: [kAXChildrenAttribute: [$0 + 1]])) }),
+                      [1: .init(values: [kAXChildrenAttribute: "not an element list"])]] as [[Int: AXElement.Read]] {
+            #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: documentSource(reads: reads)) == .unavailable)
+        }
+        let coincident = [ScriptDocuments.Window(id: 1, bounds: documentFrame), .init(id: 2, bounds: documentFrame)]
+        #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: documentSource(serverWindows: coincident)) == .unavailable)
+        #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: documentSource(windows: nil)) == .unavailable)
+        #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: documentSource(trusted: false)) == .unavailable)
+    }
+
+    @Test func documentWindowInventoryRefusesMalformedMetadataAndKeepsTitledSmallWindows() {
+        for key in [kCGWindowOwnerPID, kCGWindowLayer, kCGWindowNumber, kCGWindowBounds] {
+            var info = serverWindow(id: 1)
+            info.removeValue(forKey: key as String)
+            #expect(ScriptDocuments.windowInventory(pid: 42, info: [info], displays: []) == nil)
+        }
+        let iconSize = serverWindow(id: 1, bounds: CGRect(x: 0, y: 482, width: 64, height: 64), onscreen: false)
+        #expect(ScriptDocuments.windowInventory(pid: 42, info: [iconSize], displays: [])?.count == 1)
+    }
+
+    @Test func documentGateRefusesChangedWindowIDsFramesAndAXMembership() {
+        let base = documentSource()
+        for replacement in [nil, [.init(id: 2, bounds: documentFrame)],
+                            [.init(id: 1, bounds: CGRect(x: 153, y: 73, width: 586, height: 488))]] as [[ScriptDocuments.Window]?] {
+            var reads = 0
+            let source = ScriptDocuments.Source(applications: base.applications, trusted: base.trusted,
+                                                serverWindows: { _ in
+                reads += 1
+                return reads == 1 ? base.serverWindows(42) : replacement
+            }, windows: base.windows, read: base.read, elements: base.elements)
+            #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: source) == .unavailable)
+        }
+        var reads = 0
+        let source = ScriptDocuments.Source(applications: base.applications, trusted: base.trusted, serverWindows: base.serverWindows,
+                                            windows: { _ in
+            reads += 1
+            return reads == 1 ? [1] : [2]
+        }, read: base.read, elements: base.elements)
+        #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: source) == .unavailable)
     }
 
     @Test func documentGateChecksEverySafariAndNativeTab() {
@@ -904,10 +1006,29 @@ import Testing
         #expect(ScriptDocuments.check(bundleID: "com.apple.Safari", source: documentSource()) == .unavailable)
     }
 
+    private var documentFrame: CGRect { CGRect(x: 152, y: 73, width: 586, height: 488) }
+
+    private func serverWindow(id: CGWindowID, bounds: CGRect = CGRect(x: 152, y: 73, width: 586, height: 488),
+                              layer: Int = 0, onscreen: Bool = true, title: String = "Document") -> [String: Any] {
+        [kCGWindowOwnerPID as String: pid_t(42), kCGWindowNumber as String: id, kCGWindowLayer as String: layer,
+         kCGWindowIsOnscreen as String: onscreen, kCGWindowName as String: title,
+         kCGWindowBounds as String: bounds.dictionaryRepresentation]
+    }
+
     private func documentSource(apps: [Scripts.RunningApplication] = [.init(pid: 42, finishedLaunching: true)],
-                                windowCount: Int? = 1, reads: [Int: AXElement.Read] = [1: .init(values: [:])]) -> ScriptDocuments.Source<Int> {
-        ScriptDocuments.Source(applications: { _ in apps }, trusted: { true }, windowCount: { _ in windowCount },
-                               windows: { _ in [1] }, read: { reads[$0] }, elements: { $0 as? [Int] })
+                                serverWindows: [ScriptDocuments.Window]? = [.init(id: 1, bounds: CGRect(x: 152, y: 73, width: 586, height: 488))],
+                                windows: [Int]? = [1], frames: [Int: CGRect] = [1: CGRect(x: 152, y: 73, width: 586, height: 488)],
+                                trusted: Bool = true, reads: [Int: AXElement.Read] = [1: .init(values: [:])]) -> ScriptDocuments.Source<Int> {
+        ScriptDocuments.Source(applications: { _ in apps }, trusted: { trusted }, serverWindows: { _ in serverWindows },
+                               windows: { _ in windows }, read: { element in
+            guard var read = reads[element] else { return nil }
+            if let bounds = frames[element] {
+                if read.values[kAXRoleAttribute] == nil { read.values[kAXRoleAttribute] = kAXWindowRole }
+                read.values[kAXPositionAttribute] = bounds.origin
+                read.values[kAXSizeAttribute] = bounds.size
+            }
+            return read
+        }, elements: { $0 as? [Int] })
     }
 
     @Test func finderNavigationChecksProtectedTextWithoutRejectingHome() throws {
