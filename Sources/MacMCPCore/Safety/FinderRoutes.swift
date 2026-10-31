@@ -180,9 +180,12 @@ extension OpenRoutes {
                 read.pathBar = chain
                 continue
             }
-            let urls = items.lazy.compactMap { itemURL(of: $0, tree: t) }
-            let first = urls.first
-            guard first != nil || inBrowser || finderViewIdentifiers.contains(t.identifier(e) ?? "") else { continue }
+            let identities = items.map { itemURLRead(of: $0, tree: t) }
+            let first = identities.compactMap(\.url).first
+            guard first != nil || inBrowser || finderViewIdentifiers.contains(t.identifier(e) ?? "") else {
+                if identities.contains(where: { !$0.complete }) { read.complete = false }
+                continue
+            }
             var list = FinderList(node: e, selected: selected.items, folder: first?.deletingLastPathComponent(), column: inBrowser)
             if inBrowser {
                 if list.folder == nil { list.folder = lastColumnSelection }

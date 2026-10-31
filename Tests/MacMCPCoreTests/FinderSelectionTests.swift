@@ -28,7 +28,8 @@ import Testing
     private let tree = SelectionTree<Node>(role: { $0.failing.contains("role") ? nil : $0.role },
                                            children: { $0.failing.contains("children") ? nil : $0.children }, parent: { $0.parent },
                                            selected: { n in n.failing.contains("selection") ? .unreadable : n.selected.map { .items($0) } ?? .none },
-                                           url: { $0.url }, identifier: { $0.identifier }, frame: { $0.frame }, same: { $0 === $1 })
+                                           url: { $0.url }, fileIdentityReadable: { !$0.failing.contains("identity") },
+                                           identifier: { $0.identifier }, frame: { $0.frame }, same: { $0 === $1 })
     private let file = URL(fileURLWithPath: "/tmp/route/one.txt")
     private let other = URL(fileURLWithPath: "/tmp/route/two.txt")
 
@@ -80,6 +81,60 @@ import Testing
         // Three levels down is not the row's own file.
         let deep = Node(kAXRowRole, [Node("AXCell", [Node("AXGroup", [Node(kAXTextFieldRole, url: file)])])])
         #expect(OpenRoutes.itemURL(of: deep, tree: tree) == nil)
+    }
+
+    @Test func anItemWithItsOwnReadableURLDoesNotNeedItsChildren() {
+        let name = Node(kAXTextFieldRole, url: file)
+        name.failing = ["children"]
+        #expect(OpenRoutes.itemURL(of: name, tree: tree) == file)
+        let row = Node(kAXRowRole, [Node("AXCell", [name])])
+        #expect(OpenRoutes.itemURL(of: row, tree: tree) == file)
+        name.failing.insert("identity")
+        #expect(OpenRoutes.itemURL(of: name, tree: tree) == nil, "a URL never excuses unreadable file identity")
+        #expect(OpenRoutes.itemURL(of: row, tree: tree) == nil)
+        name.failing = ["children"]
+        row.children[0].failing = ["children"]
+        #expect(OpenRoutes.itemURL(of: row, tree: tree) == nil, "a container without its own URL still needs children")
+        let nameless = Node(kAXTextFieldRole)
+        nameless.failing = ["children"]
+        #expect(!OpenRoutes.itemURLRead(of: nameless, tree: tree).complete)
+    }
+
+    @Test func aSidebarPlaceCannotHideAnUnreadableNameCell() {
+        let visible = Node("AXCell", [Node(kAXStaticTextRole)])
+        let hidden = Node("AXCell", [Node(kAXTextFieldRole, url: file)])
+        let row = Node(kAXRowRole, [visible, hidden])
+        let sidebar = list(kAXOutlineRole, [row], selecting: [row])
+        hidden.failing = ["children"]
+        #expect(!OpenRoutes.isSidebarPlace(row, in: sidebar, tree: tree))
+        #expect(OpenRoutes.selectionRead([row], url: { OpenRoutes.itemURL(of: $0, tree: tree) },
+                                          isPlace: { OpenRoutes.isSidebarPlace($0, in: sidebar, tree: tree) }) == .unreadable)
+        hidden.failing = ["identity"]
+        #expect(!OpenRoutes.isSidebarPlace(row, in: sidebar, tree: tree))
+        let place = sidebarRow()
+        #expect(OpenRoutes.isSidebarPlace(place, in: sidebar, tree: tree))
+        place.children[0].children[1].failing = ["role"]
+        #expect(!OpenRoutes.isSidebarPlace(place, in: sidebar, tree: tree))
+    }
+
+    @Test func aSkippedListWithUnreadableFirstItemsMakesTheWindowIncomplete() {
+        let row = listRow(file)
+        let known = list(kAXListRole, [iconItem(other)], selecting: [], identifier: "IconView")
+        // No recognized view identifier: reading the first items is the only way to recognize this file list.
+        let unknown = list(kAXOutlineRole, [row], selecting: [row])
+        row.failing = ["children"]
+        let w = Node(kAXWindowRole, [known, unknown])
+        let result = OpenRoutes.finderLists(in: w, tree: tree)
+        #expect(result.lists.count == 1)
+        #expect(!result.complete)
+        #expect(OpenRoutes.finderView(result, tree: tree).selection == nil, "the readable empty list cannot hide the skipped selection")
+        row.failing = []
+        #expect(OpenRoutes.finderLists(in: w, tree: tree).complete)
+        #expect(read(focused: nil, in: w) == [file])
+    }
+
+    @Test func anUnreadableFinderSelectionAsksForAPersonWithoutGivingAnAgentTheRemedy() {
+        #expect(OpenRoutes.unreadableSelectionRefusal == "Refused: Finder isn't reporting its selection. Ask the person to check Finder.")
     }
 
     @Test func aSelectedItemWithNoFileMakesTheSelectionUnreadable() {

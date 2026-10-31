@@ -762,7 +762,7 @@ private final class FaultyTree: Sendable {
                 for key in ["cmd+c", "cmd+v", "cmd+3"] {
                     #expect(OpenRoutes.finderKeyRefusal(try KeySpec.parse(key), selection: selected, policy: Policy()) == nil)
                 }
-                #expect(t.walk().1.readFailures == 0, "leaf child failures don't report missing elements in snapshots")
+                #expect(t.walk().1.readFailures > 0, "the leaf exception is confined to selection reads, not snapshots")
             } else {
                 #expect(selected == nil && focused == nil && dragged == nil, "\(failure)")
                 #expect(OpenRoutes.finderKeyRefusal(try KeySpec.parse("cmd+c"), selection: selected, policy: Policy()) != nil)
@@ -773,16 +773,16 @@ private final class FaultyTree: Sendable {
         }
     }
 
-    @Test func onlyTheKnownLeafChildrenFailureIsIgnoredBySnapshots() {
+    @Test func snapshotsCountLeafChildrenFailuresForEveryApp() {
         for role in ["AXTextField", "AXStaticText", "AXImage", "AXRow", "AXGroup"] {
             for error in [AXError.failure, .cannotComplete] {
                 let t = FaultyTree()
                 t.add(1, role: "AXWindow", children: [2])
                 t.add(2, role: role, value: "Name", errors: ["AXChildren": error])
                 let (raw, stats) = t.walk()
-                let safe = AXLeaf.roles.contains(role) && error == .failure
-                #expect(stats.complete == safe && stats.textComplete == safe, "\(role) \(error)")
-                #expect(raw.identityUncertain != safe && raw.textUncertain != safe)
+                #expect(!stats.complete && !stats.textComplete, "\(role) \(error)")
+                #expect(stats.readFailures > 0)
+                #expect(raw.identityUncertain && raw.textUncertain)
             }
         }
     }

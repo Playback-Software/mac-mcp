@@ -8,9 +8,11 @@ import Testing
     final class Node {
         var probe: FilePanelScan.Probe
         var children: [Node]?
-        init(_ role: String, id: String = "", fileURL: Bool = false, remote: Bool = false, _ children: [Node]? = []) {
+        var pid: pid_t
+        init(_ role: String, id: String = "", fileURL: Bool = false, remote: Bool = false, pid: pid_t? = nil, _ children: [Node]? = []) {
             probe = FilePanelScan.Probe(role: role, identifier: id, fileURL: fileURL, remote: remote)
             self.children = children
+            self.pid = pid ?? (remote ? 2 : 1)
         }
     }
 
@@ -25,6 +27,10 @@ import Testing
     }
 
     private func verdict(_ root: Node) -> FilePanelScan.Verdict { Walk().verdict(root) }
+
+    private func services(_ root: Node) -> Set<pid_t> {
+        FilePanelScan.servicePIDs(root, probe: { $0.probe }, pid: { $0.pid }, children: { $0.children })
+    }
 
     private func rows(_ count: Int, fileURL: Bool = false) -> [Node] {
         (0..<count).map { _ in Node("AXRow", [Node("AXCell", [Node("AXTextField", fileURL: fileURL, [])])]) }
@@ -156,10 +162,11 @@ import Testing
         let sheet = Node("AXSheet", id: "save-panel", [Node("AXRow", remote: true)])
         let bounds = CGRect(x: 100, y: 100, width: 500, height: 400)
         var attached = true
-        func owns(_ owner: String?, prompt: Bool = false, at p: CGPoint = CGPoint(x: 200, y: 200), menu: Bool = false) -> Bool {
-            OpenRoutes.filePanelOwnsPoint(ownerBundleID: owner, prompt: prompt, point: p,
-                                          panel: { attached ? sheet : nil }, verified: { verdict($0) == .panel },
-                                          frame: { _ in bounds }, linkedMenu: { _ in menu })
+        func owns(_ bundle: String?, owner: pid_t = 2, hitPID: pid_t = 2, prompt: Bool = false,
+                  at p: CGPoint? = CGPoint(x: 200, y: 200), inside: Bool = true, menu: Bool = false) -> Bool {
+            OpenRoutes.filePanelOwnsPoint(owner: owner, hitPID: hitPID, ownerBundleID: bundle, prompt: prompt, point: p,
+                                          panel: { attached ? sheet : nil }, servicePIDs: services,
+                                          frame: { _ in bounds }, insidePanel: { _ in inside }, linkedMenu: { _ in menu })
         }
         func scroll(_ allowed: Bool, inside: Bool = true) -> Bool {
             let reaches = Actions.pointerReaches(targetPID: 1, targetWindow: 1, owner: 2, hitPID: 2, hitWindow: 2,
@@ -167,11 +174,18 @@ import Testing
             return Actions.wheelReaches(receiverMatches: reaches, insideArea: inside)
         }
         #expect(owns(OpenRoutes.panelService))   // coordinate click, drag and hover use this ownership check
+        #expect(owns(OpenRoutes.panelService, at: nil), "refs use the same service-pid verification")
         #expect(scroll(owns(OpenRoutes.panelService)))
         #expect(!scroll(owns(OpenRoutes.panelService), inside: false), "the ref's scroll-area guard still applies")
         #expect(!owns("com.apple.TextEdit"))
         #expect(!owns("com.apple.SecurityAgent", prompt: true))
         #expect(!owns(OpenRoutes.panelService, prompt: true))
+        #expect(!owns(OpenRoutes.panelService, owner: 3, hitPID: 3), "another app's service process can overlap the host's panel")
+        #expect(!scroll(owns(OpenRoutes.panelService, owner: 3, hitPID: 3)))
+        #expect(!owns(OpenRoutes.panelService, hitPID: 3), "the hit must belong to the pixel owner")
+        #expect(!owns(OpenRoutes.panelService, hitPID: 3, menu: true), "a linked menu doesn't waive pid matching")
+        #expect(!owns(OpenRoutes.panelService, inside: false), "frame overlap without panel ancestry grants nothing")
+        #expect(!owns(OpenRoutes.panelService, at: nil, inside: false))
         #expect(!scroll(owns("com.example.other")))
         let outside = CGPoint(x: 650, y: 200)
         #expect(!owns(OpenRoutes.panelService, at: outside))
@@ -184,6 +198,45 @@ import Testing
         sheet.probe.identifier = ""
         sheet.children = nil
         #expect(!owns(OpenRoutes.panelService), "unreadable is conservative evidence for commit checks, never a pointer exemption")
+    }
+
+    @Test func serviceVerificationCollectsAttachedPIDsBeyondClassificationEvidence() {
+        let sheet = Node("AXSheet", id: "save-panel", [Node("AXBrowser"), Node("AXGroup", [
+            Node("AXSplitter", remote: true, pid: 2), Node("AXSplitter", remote: true, pid: 4),
+        ])])
+        #expect(verdict(sheet) == .panel)
+        #expect(services(sheet) == [2, 4], "classification at the sheet must not stop service discovery")
+    }
+
+    @Test func overlappingPanelsKeepEachServiceProcessBoundToItsOwnHost() {
+        let allowed = Node("AXSheet", id: "save-panel", [Node("AXSplitter", remote: true, pid: 2)])
+        let denied = Node("AXSheet", id: "save-panel", [Node("AXSplitter", remote: true, pid: 3)])
+        let overlap = CGRect(x: 100, y: 100, width: 500, height: 400)
+        func owns(_ owner: pid_t, hostPanel: Node, hitPanel: Node) -> Bool {
+            OpenRoutes.filePanelOwnsPoint(owner: owner, hitPID: owner, ownerBundleID: OpenRoutes.panelService,
+                                          prompt: false, point: CGPoint(x: 200, y: 200), panel: { hostPanel },
+                                          servicePIDs: services, frame: { _ in overlap },
+                                          insidePanel: { $0 === hitPanel }, linkedMenu: { _ in false })
+        }
+        #expect(services(allowed) == [2] && services(denied) == [3])
+        #expect(owns(2, hostPanel: allowed, hitPanel: allowed))
+        #expect(owns(3, hostPanel: denied, hitPanel: denied))
+        #expect(!owns(3, hostPanel: allowed, hitPanel: denied), "app= cannot borrow another host's service process")
+        #expect(!owns(2, hostPanel: allowed, hitPanel: denied), "a hit outside the host's panel is refused even for its service pid")
+        #expect(!OpenRoutes.filePanelOwnsPoint(owner: 2, host: 1, at: CGPoint(x: 200, y: 200)), "a missing AX hit cannot be verified")
+    }
+
+    @Test func aHostWindowClassifiedAsAPanelCannotBorrowAnOverlappingServiceWindow() {
+        let impostors = [Node("AXWindow", [Node("AXBrowser")]), Node("AXWindow", id: "open-panel"),
+                         Node("AXWindow", [Node("AXList", rows(1, fileURL: true))])]
+        for window in impostors {
+            #expect(verdict(window) == .panel)
+            #expect(services(window).isEmpty)
+            #expect(!OpenRoutes.filePanelOwnsPoint(owner: 2, hitPID: 2, ownerBundleID: OpenRoutes.panelService,
+                                                  prompt: false, point: CGPoint(x: 10, y: 10), panel: { window },
+                                                  servicePIDs: services, frame: { _ in CGRect(x: 0, y: 0, width: 100, height: 100) },
+                                                  insidePanel: { _ in true }, linkedMenu: { _ in true }))
+        }
     }
 
     @Test func aPanelVerdictLastsWhileThePanelDoesAndANotPanelVerdictOnlyBriefly() {
