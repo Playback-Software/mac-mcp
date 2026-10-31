@@ -1,6 +1,18 @@
 import ApplicationServices
 import Foundation
 
+/// Finder can persistently answer kAXErrorFailure for AXChildren on its name fields and icons. These roles are
+/// leaves: that one error can't hide a subtree when the attributes that identify the leaf were read successfully.
+enum AXLeaf {
+    static let roles: Set<String> = [kAXTextFieldRole, kAXStaticTextRole, kAXImageRole]
+    static let identityAttributes = [kAXRoleAttribute, kAXValueAttribute, kAXTitleAttribute, kAXURLAttribute]
+
+    static func ignoresChildrenFailure(role: String, errors: [String: AXError]) -> Bool {
+        roles.contains(role) && errors[kAXChildrenAttribute] == .failure
+            && !identityAttributes.contains(where: { errors[$0] != nil })
+    }
+}
+
 /// A thin, Sendable wrapper around `AXUIElement`.
 ///
 /// Every attribute read is a synchronous IPC round trip into the target app's main thread, so reads are batched

@@ -205,6 +205,7 @@ public enum Walker {
                     if let value = again.values[name] { v[name] = value }
                 }
             }
+            if AXLeaf.ignoresChildrenFailure(role: role, errors: errors) { errors["AXChildren"] = nil }
 
             var n = RawNode(role: role)
             n.element = element

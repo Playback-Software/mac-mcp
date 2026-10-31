@@ -439,6 +439,9 @@ The routes that open things are checked against the app policy as well:
   A failed read is told apart from an attribute an element doesn't have: a list whose selected rows or children fail
   to read has an unknown selection, even when the other reads empty, and an element whose role or children fail to
   read could hide a file list, so the window's selection is unknown too.
+  The exception is a repeated `kAXErrorFailure` for `AXChildren` on a known leaf (`AXTextField`, `AXStaticText`,
+  `AXImage`) whose file-identifying value, title and URL reads succeeded or were absent. That error can't hide a file
+  list. Failed name or URL reads, and failed children on rows and containers, still leave the selection unknown.
   When it can't be read (no file list in the window, a list whose selection can't be read, or a selected item with
   no file URL), every key and menu item that acts on it is refused with "Finder's selection couldn't
   be checked; select the items again or use a path you can see": ⌘C, ⌘X, ⌘V, ⌥⌘V, ⌘D, ⌘L, ⌘⌫, Return, Enter, Delete,

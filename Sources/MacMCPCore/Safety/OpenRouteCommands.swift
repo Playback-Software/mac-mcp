@@ -434,7 +434,8 @@ extension OpenRoutes {
         return validate(result)
     }
 
-    public static let unreadableSelectionRefusal = "Refused: Finder's selection couldn't be checked; select the items again or use a path you can see."
+    public static let unreadableSelectionRefusal = "Refused: Finder's selection couldn't be checked; select the items again or use a path you can see. "
+        + "If this keeps happening, tell the person that quitting and reopening Finder can clear it; agents must not relaunch Finder."
 
     public static func mutationSelectionRefusal(_ urls: [URL]?) -> String? {
         guard let urls else { return unreadableSelectionRefusal }
@@ -494,8 +495,14 @@ extension OpenRoutes {
     static func itemURL<N>(of item: N, tree t: SelectionTree<N>) -> URL? {
         var level = [item]
         for _ in 0..<3 {
+            // An unreadable row/container can hide the name field; an unreadable name or URL is never absence.
+            var next: [N] = []
+            for node in level {
+                guard t.fileIdentityReadable(node), let children = t.children(node) else { return nil }
+                next += children
+            }
             if let url = level.lazy.compactMap(t.url).first { return url }
-            level = level.flatMap { t.children($0) ?? [] }
+            level = next
         }
         return nil
     }
