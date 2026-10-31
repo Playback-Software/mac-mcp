@@ -901,7 +901,7 @@ import Testing
         #expect(ScriptDocuments.snapshot(bundleID: "com.apple.finder", source: source).inventory == .init(pid: 42, tabsPerWindow: [0, 0]))
     }
 
-    @Test func documentGateMatchesMailSheetAndRefusesUnclassifiedOffscreenWindows() throws {
+    @Test func documentGateMatchesMailSheetAndSkipsItsUntitledHelperWindows() throws {
         let main = CGRect(x: 226, y: 76, width: 1059, height: 688)
         let sheet = CGRect(x: 521, y: 212, width: 470, height: 416)
         let display = CGRect(x: 0, y: 0, width: 1512, height: 982)
@@ -916,22 +916,27 @@ import Testing
         reads[2]?.values[kAXDocumentAttribute] = home + "/.ssh/config"
         #expect(ScriptDocuments.check(bundleID: "com.apple.mail", source: documentSource(serverWindows: checked, frames: frames, reads: reads)) == .protected)
         reads[2]?.values.removeValue(forKey: kAXDocumentAttribute)
-        // The live eight-window Mail shape has two more unnamed, unordered windows. Their metadata cannot prove
-        // that they are backing windows rather than hidden documents; exempting them would fail open.
+        // The live eight-window Mail shape has two more offscreen windows. Untitled, they aren't documents (a
+        // document window takes its file's name), so they're skipped; titled, they'd have to match AX.
         let all = try #require(documentWindows(info + [
             serverWindow(id: 7, bounds: CGRect(x: 0, y: 482, width: 500, height: 500), onscreen: false, title: ""),
             serverWindow(id: 8, bounds: CGRect(x: 100, y: 750, width: 100, height: 132), onscreen: false, title: ""),
         ], displays: [display]))
-        #expect(all.count == 4)
-        #expect(ScriptDocuments.check(bundleID: "com.apple.mail", source: documentSource(serverWindows: all, frames: frames, reads: reads)) == .unavailable)
+        #expect(all.count == 2)
+        #expect(ScriptDocuments.check(bundleID: "com.apple.mail", source: documentSource(serverWindows: all, frames: frames, reads: reads)) == .safe)
+        let titled = try #require(documentWindows(info + [
+            serverWindow(id: 7, bounds: CGRect(x: 0, y: 482, width: 500, height: 500), onscreen: false, title: "Draft"),
+        ], displays: [display]))
+        #expect(ScriptDocuments.check(bundleID: "com.apple.mail", source: documentSource(serverWindows: titled, frames: frames, reads: reads)) == .unavailable)
     }
 
     @Test func documentGateKeepsMinimizedHiddenAndOtherSpaceWindows() throws {
         let other = CGRect(x: 50, y: 50, width: 586, height: 488)
-        // isOnscreen=false must not discard a real window, with or without a title. No Space switch is needed
-        // to test that omitting it from AX fails closed, while an AX-listed minimized/hidden window is checked.
+        // isOnscreen=false must not discard a titled window, or one whose title couldn't be read. No Space switch
+        // is needed to test that omitting it from AX fails closed, while an AX-listed minimized/hidden window is
+        // checked. (An offscreen window with an empty title isn't a document; see the helper-window tests.)
         for displays in [[], [primaryDisplay]] {
-            for title in ["Document", "", nil] as [String?] {
+            for title in ["Document", nil] as [String?] {
                 let checked = try #require(documentWindows([serverWindow(id: 1),
                     serverWindow(id: 2, bounds: other, onscreen: false, title: title)], displays: displays))
                 #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: documentSource(serverWindows: checked)) == .unavailable)
@@ -984,20 +989,29 @@ import Testing
         }
     }
 
-    @Test func documentBackingExemptionsKeepOnscreenIconsAndNearMissStrips() throws {
+    @Test func documentBackingExemptionsKeepOnscreenAndTitledWindowsOfAnySize() throws {
         let secondary = CGRect(x: 1512, y: 0, width: 1512, height: 982)
-        let candidates = [
-            serverWindow(id: 2, bounds: CGRect(x: 0, y: 482, width: 64, height: 64), title: ""),
-            serverWindow(id: 2, bounds: CGRect(x: 0, y: 0, width: 1512, height: 41), onscreen: false, title: ""),
-            serverWindow(id: 2, bounds: CGRect(x: 0, y: 0, width: 1511, height: 33), onscreen: false, title: ""),
-            serverWindow(id: 2, bounds: CGRect(x: 0, y: 1, width: 1512, height: 33), onscreen: false, title: ""),
-            serverWindow(id: 2, bounds: CGRect(x: 1512, y: 0, width: 1512, height: 33), onscreen: false, title: ""),
-            serverWindow(id: 2, bounds: CGRect(x: 0, y: 0, width: 1512, height: 32), onscreen: false, title: ""),
-        ]
-        for candidate in candidates {
-            let checked = try #require(documentWindows([serverWindow(id: 1), candidate], displays: [primaryDisplay, secondary]))
-            #expect(checked.count == 2)
-            #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: documentSource(serverWindows: checked)) == .unavailable)
+        let shapes = [CGRect(x: 0, y: 482, width: 64, height: 64), CGRect(x: 0, y: 482, width: 500, height: 500),
+                      CGRect(x: 0, y: 0, width: 1512, height: 41), CGRect(x: 1512, y: 0, width: 1512, height: 33),
+                      CGRect(x: 200, y: 200, width: 100, height: 132)]
+        for bounds in shapes {
+            for candidate in [serverWindow(id: 2, bounds: bounds, title: ""),   // onscreen: AX must see it
+                              serverWindow(id: 2, bounds: bounds, onscreen: false, title: "notes.txt")] {
+                let checked = try #require(documentWindows([serverWindow(id: 1), candidate], displays: [primaryDisplay, secondary]))
+                #expect(checked.count == 2)
+                #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: documentSource(serverWindows: checked)) == .unavailable)
+            }
+        }
+    }
+
+    /// Measured on macOS 27.2: TextEdit's offscreen helper window was 64×64 in one session and 500×500 in the next,
+    /// and Mail has 500×500 and 100×132 ones. Offscreen and untitled, they're exempt whatever their size.
+    @Test func offscreenUntitledHelperWindowsAreExemptWhateverTheirSize() throws {
+        for bounds in [CGRect(x: 0, y: 482, width: 500, height: 500), CGRect(x: 0, y: 482, width: 100, height: 132),
+                       CGRect(x: 0, y: 0, width: 1511, height: 33)] {
+            let checked = try #require(documentWindows([serverWindow(id: 1), serverWindow(id: 2, bounds: bounds, onscreen: false, title: "")]))
+            #expect(checked.count == 1)
+            #expect(ScriptDocuments.check(bundleID: "com.apple.TextEdit", source: documentSource(serverWindows: checked)) == .safe)
         }
     }
 
@@ -1015,20 +1029,13 @@ import Testing
         }
     }
 
-    @Test func documentMenuStripHeightComesFromThePrimarySystemMenuBar() throws {
-        for height in [24, 33] as [CGFloat] {
+    @Test func menuBarStripsAreSkippedWhateverTheirHeight() throws {
+        for height in [24, 33, 34] as [CGFloat] {
             let strip = serverWindow(id: 2, bounds: CGRect(x: 0, y: 0, width: 1512, height: height), onscreen: false, title: "")
             #expect(documentWindows([strip], menuBarHeight: height)?.isEmpty == true)
-            #expect(documentWindows([strip], menuBarHeight: nil)?.count == 1)
-            #expect(documentWindows([strip], menuBarHeight: height + 1)?.count == 1)
-            #expect(documentWindows([strip], displays: [], menuBarHeight: height)?.count == 1)
+            #expect(documentWindows([strip], menuBarHeight: nil)?.isEmpty == true)
+            #expect(documentWindows([strip], displays: [], menuBarHeight: height)?.isEmpty == true)
         }
-        var conflicting = serverWindow(id: 9001, bounds: CGRect(x: 0, y: 0, width: 1512, height: 24),
-                                       layer: Int(CGWindowLevelForKey(.mainMenuWindow)))
-        conflicting[kCGWindowOwnerPID as String] = pid_t(777)
-        conflicting[kCGWindowOwnerName as String] = "Window Server"
-        let strip = serverWindow(id: 2, bounds: menuStrip, onscreen: false, title: "")
-        #expect(try #require(documentWindows([conflicting, strip])).count == 1)
     }
 
     @Test func documentGateCannotUseAFloatingPanelToCoverACoincidentDocument() throws {

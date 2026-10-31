@@ -530,29 +530,14 @@ enum ScriptDocuments {
         let onscreen: Bool
     }
 
-    /// Only the primary display's observed menu bar defines an exempt strip. Secondary-display bars have not
-    /// been classified. No guessed height or visible-frame fallback: unknown or conflicting geometry exempts none.
-    static func menuBarBounds(info: [[String: Any]], displays: [CGRect]) -> CGRect? {
-        guard let primary = displays.first(where: { $0.origin == .zero }) else { return nil }
-        let bars = info.compactMap { entry -> CGRect? in
-            guard entry[kCGWindowOwnerName as String] as? String == "Window Server",
-                  entry[kCGWindowLayer as String] as? Int == Int(CGWindowLevelForKey(.mainMenuWindow)),
-                  let dictionary = entry[kCGWindowBounds as String] as? [String: Any],
-                  let bounds = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
-                  bounds.origin == primary.origin, bounds.width == primary.width,
-                  bounds.height.isFinite, bounds.height > 0, bounds.height < primary.height else { return nil }
-            return bounds
-        }
-        guard let bar = bars.first, bars.allSatisfy({ $0 == bar }) else { return nil }
-        return bar
-    }
-
     /// Unordered windows are not necessarily backing windows: minimized windows and windows on other Spaces
-    /// must remain in this inventory. Exempt only the observed icon and menu-bar backing shapes, never arbitrary
-    /// unnamed or offscreen windows. An absent name (including redaction without Screen Recording) is unknown.
+    /// must remain in this inventory. A document window always has a title (its file's name), so only an offscreen
+    /// window whose name is present and empty, read with Screen Recording live, and with the backing traits measured
+    /// below is exempt. Its size isn't: apps' helper windows vary (64×64 and 500×500 icon windows, 100×132, menu-bar
+    /// strips). An absent name (including redaction without Screen Recording) is unknown, and onscreen windows are
+    /// always checked.
     static func windowInventory(pid: pid_t, info: [[String: Any]], displays: [CGRect], screenRecording: Bool) -> [Window]? {
         var windows: [Window] = [], ids: Set<CGWindowID> = []
-        let menuBar = menuBarBounds(info: info, displays: displays)
         for entry in info {
             guard let owner = entry[kCGWindowOwnerPID as String] as? pid_t else { return nil }
             guard owner == pid else { continue }
@@ -573,7 +558,7 @@ enum ScriptDocuments {
                entry[kCGWindowSharingState as String] as? Int == Int(CGWindowSharingType.readOnly.rawValue),
                entry[kCGWindowStoreType as String] as? Int == Int(CGWindowBackingType.backingStoreNonretained.rawValue),
                entry[kCGWindowAlpha as String] as? Double == 1 {
-                if bounds.size == CGSize(width: 64, height: 64) || bounds == menuBar { continue }
+                continue
             }
             windows.append(Window(id: id, bounds: bounds, onscreen: onscreen))
         }

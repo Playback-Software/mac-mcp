@@ -44,9 +44,8 @@ MacMCP is in early development, so tools and policy keys may change before 1.0.
 
 - `mac_script` refused every allowed app that had a window on macOS 27: its open-documents check required the window
   server and Accessibility to list the same number of windows, and macOS 27 adds offscreen helper windows to every
-  app. The check now matches each window to its Accessibility element by window ID, and skips only the exact icon and
-  menu-bar backing windows, confirmed untitled through Screen Recording. Apps with other unexplained hidden windows
-  (Mail, for one) are still refused.
+  app. The check now matches each window to its Accessibility element by window ID, and skips only offscreen helper
+  windows whose title is present and empty (read with Screen Recording); a document window always has a title.
 - `mac_menu` accepts a path sent as a JSON array inside a string (`"[\"File\", \"Save As…\"]"`).
 
 ### Documentation

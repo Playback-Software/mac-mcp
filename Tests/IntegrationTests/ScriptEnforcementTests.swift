@@ -50,9 +50,7 @@ extension Integration {
         #expect(result.status != 0 && result.stderr.contains("Refused Apple event"))
     }
 
-    // Not Mail: it keeps offscreen helper windows with no Accessibility element, so the open-documents check refuses
-    // it (and macOS never gets to ask for its Automation grant).
-    static let grantedApps = ["TextEdit", "Finder"]
+    static let grantedApps = ["Mail", "TextEdit", "Finder"]
     /// Whether macOS has granted MacMCP Automation for every app below, as mac_doctor reports it once they're in
     /// script.allowed_apps. Only a person at the screen can grant it, so without it the test is skipped, not failed.
     static let automationGranted: Bool = {
@@ -65,9 +63,10 @@ extension Integration {
 
     /// Runs through the installed agent (mac_script), whose signed executable holds the grants; the test runner's
     /// unsigned build of the host has none. These scripts only read app data.
-    @Test(.enabled(if: automationGranted, "needs MacMCP Automation grants for TextEdit and Finder (approved by a person at the screen)"))
+    @Test(.enabled(if: automationGranted, "needs MacMCP Automation grants for Mail, TextEdit and Finder (approved by a person at the screen)"))
     func ordinaryDocumentAutomationAcceptsUseBoilerplate() throws {
         let scripts = [
+            ("Mail", "tell application \"Mail\"\nif (count of messages of inbox) > 0 then\nget read status of message 1 of inbox\nelse\nreturn true\nend if\nend tell"),
             ("TextEdit", "tell application \"TextEdit\" to get name of every document"),
             ("Finder", "tell application \"Finder\" to get name of every file of desktop"),
         ]

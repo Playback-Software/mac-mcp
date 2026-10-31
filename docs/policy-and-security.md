@@ -670,19 +670,17 @@ app rather than falling back to a frame match. A floating panel on another layer
 `AXDialog` is a subrole of `AXWindow`, not a separate role. This handles sheets reported as AX descendants and
 Finder's desktop scroll area reported in `AXWindows`, without equating the two raw window counts. Other window
 layers (including Finder's desktop), empty windows, and narrowly classified backing windows are excluded.
-Backing exemptions require a non-prompting Screen
+Helper-window exemptions require a non-prompting Screen
 Recording preflight and an explicitly present, empty `kCGWindowName` in the fresh window inventory; a missing name
-never counts as empty. Without that permission, no backing shapes are exempt. The synchronous preflight can cache
+never counts as empty. Without that permission, no window is exempt. The synchronous preflight can cache
 a denial, conservatively disabling exemptions until restart; a cached grant alone cannot exempt a window whose
 live title key is redacted. The window must also be offscreen, with `kCGWindowSharingState == 1` (read-only),
-`kCGWindowStoreType == 1` (nonretained) and `kCGWindowAlpha == 1`, as measured on Finder/TextEdit backing windows.
-The only exempt shapes are exactly 64×64, or exactly the primary display's menu-bar frame. The latter comes from
-the `Window Server` window at the system menu layer spanning the primary display's top edge, including its exact
-height (33 points on the observed notched display). No guessed height, tolerance or secondary-display strip is
-exempt; missing or conflicting system menu-bar frames disable the strip exemption. Titled windows of those sizes
-remain checked. Other unnamed or offscreen windows are **not** exempt: their metadata cannot establish that they
-are backing windows rather than hidden documents. This can still refuse apps with unclassified backing windows, including Mail's offscreen
-500×500 and 100×132 windows observed on macOS 27.2. Their onscreen 470×416 sheet is checked through AX.
+`kCGWindowStoreType == 1` (nonretained) and `kCGWindowAlpha == 1`, as measured on Finder, TextEdit and Mail helper
+windows. Size doesn't count: those helper windows vary (64×64 and 500×500 icon windows, Mail's 100×132 one,
+menu-bar strips), and the same app's can change size between sessions. The rule rests on the title instead: a
+document window takes its file's name, and a file can't have an empty name, so an offscreen window whose title is
+present and empty isn't a document. Titled offscreen windows, windows whose title can't be read, and every onscreen
+window must match an AX element by window ID.
 Window IDs, frames, onscreen state and AX window membership must stay consistent through the walk. Windows on
 another Space or minimized windows must be exposed by AX; a candidate missing from AX refuses the app rather than
 assuming it is harmless. It checks document/URL values in window descendants and every tab
