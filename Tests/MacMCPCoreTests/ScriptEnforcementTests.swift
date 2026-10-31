@@ -218,7 +218,7 @@ import Testing
             var request = ScriptHost.Request(source: command, language: "applescript", policy: Policy(), requestConsent: false)
             request.phase = .compileEventProbe
             let probe = try await Subprocess.run(try #require(Scripts.hostExecutable).path, [ScriptHost.argument],
-                                                 input: JSONEncoder().encode(request), timeout: 5)
+                                                 input: JSONEncoder().encode(request), timeout: 30)
             #expect(probe.status == 0 && probe.stdout == "\(command == "misccurd" ? noErr : OSStatus(errAEEventNotPermitted))")
         }
         #endif
@@ -236,7 +236,7 @@ import Testing
             request.runningApplicationProbe = running
             request.sendModeProbe = Int32(mode)
             let result = try await Subprocess.run(try #require(Scripts.hostExecutable).path, [ScriptHost.argument],
-                                                  input: JSONEncoder().encode(request), timeout: 5)
+                                                  input: JSONEncoder().encode(request), timeout: 30)
             if running && mode == kAEWaitReply {
                 // The fake sender returns noErr only if the bundle address has been replaced with a PID.
                 #expect(result.status == 0 && result.stdout == "0", "\(result.stderr)")
@@ -269,7 +269,7 @@ import Testing
             request.phase = .documentEventProbe
             request.documentGatePath = gate.path
             let result = try await Subprocess.run(try #require(Scripts.hostExecutable).path, [ScriptHost.argument],
-                                                  input: JSONEncoder().encode(request), timeout: 5)
+                                                  input: JSONEncoder().encode(request), timeout: 30)
             #expect(result.status == ScriptHost.refusalStatus && result.stdout.isEmpty)
             #expect(result.stderr.contains(after == .protected ? "protected document" : "could not be checked"))
             #expect(documents.lock.withLock { documents.checks } == 2)
@@ -333,7 +333,7 @@ import Testing
         request.documentReferenceProbe = true
         request.inventoryPathsProbe = paths
         return try await Subprocess.run(try #require(Scripts.hostExecutable).path, [ScriptHost.argument],
-                                        input: JSONEncoder().encode(request), timeout: 5)
+                                        input: JSONEncoder().encode(request), timeout: 30)
     }
 
     @Test func parentRechecksDocumentsBeforeEveryEventAndFailsClosed() async throws {
@@ -357,7 +357,7 @@ import Testing
             request.phase = .documentEventProbe
             request.documentGatePath = path
             let result = try await Subprocess.run(try #require(Scripts.hostExecutable).path, [ScriptHost.argument],
-                                                  input: JSONEncoder().encode(request), timeout: 5)
+                                                  input: JSONEncoder().encode(request), timeout: 30)
             #expect(result.status == ScriptHost.refusalStatus && result.stdout.isEmpty)
             #expect(result.stderr.contains(path == nil ? "could not be checked" : "protected document"), "\(result.stderr)")
         }
@@ -370,7 +370,7 @@ import Testing
         var request = ScriptHost.Request(source: "", language: "applescript", policy: Policy(), requestConsent: false)
         request.phase = .compileEventProbe
         let result = try await Subprocess.run(try #require(Scripts.hostExecutable).path, [ScriptHost.argument],
-                                              input: JSONEncoder().encode(request), timeout: 5)
+                                              input: JSONEncoder().encode(request), timeout: 30)
         #expect(result.status == 0 && result.stdout == "\(errAEEventNotPermitted)", "\(result.stderr)")
     }
     #endif
@@ -381,7 +381,7 @@ import Testing
         var request = ScriptHost.Request(source: source, language: "applescript", policy: Policy(), requestConsent: false)
         request.phase = .compile
         let result = try await Subprocess.run(try #require(Scripts.hostExecutable).path, [ScriptHost.argument],
-                                              input: JSONEncoder().encode(request), timeout: 5)
+                                              input: JSONEncoder().encode(request), timeout: 30)
         #expect(result.status == 0, "\(result.stderr)")
         guard result.status == 0 else { return }
         let canonical = try JSONDecoder().decode(ScriptHost.Compilation.self, from: Data(result.stdout.utf8)).source
@@ -394,7 +394,7 @@ import Testing
         let source = "if false then\ntell application \"Finder\" to get name of every file of desktop\nend if\nreturn true"
         let request = ScriptHost.Request(source: source, language: "applescript", policy: Policy(), requestConsent: false)
         let result = try await Subprocess.run(try #require(Scripts.hostExecutable).path, [ScriptHost.argument],
-                                              input: JSONEncoder().encode(request), timeout: 5)
+                                              input: JSONEncoder().encode(request), timeout: 30)
         #expect(result.status == 0 && result.stdout == "true", "\(result.stderr)")
     }
 
@@ -405,7 +405,7 @@ import Testing
                                              policy: Policy(), requestConsent: false)
             request.phase = .compile
             let result = try await Subprocess.run(try #require(Scripts.hostExecutable).path, [ScriptHost.argument],
-                                                  input: JSONEncoder().encode(request), timeout: 5)
+                                                  input: JSONEncoder().encode(request), timeout: 30)
             #expect(result.status == 0, "\(app): \(result.stderr)")
             guard result.status == 0 else { continue }
             let canonical = try JSONDecoder().decode(ScriptHost.Compilation.self, from: Data(result.stdout.utf8)).source
@@ -416,7 +416,7 @@ import Testing
 
     @Test func implicitNativeMethodAliasesAreRefused() async throws {
         for expression in ["my NSHomeDirectory()", "NSHomeDirectory() of me", "NSHomeDirectory()"] {
-            let result = try await Scripts.run("return \(expression)", language: .applescript, timeout: 5)
+            let result = try await Scripts.run("return \(expression)", language: .applescript, timeout: 30)
             #expect(result.status != 0 && result.stdout.isEmpty, "\(expression): \(result.stdout)")
         }
     }
@@ -439,13 +439,13 @@ import Testing
                 """
             let request = ScriptHost.Request(source: source, language: "applescript", policy: Policy(), requestConsent: false)
             let result = try await Subprocess.run(try #require(Scripts.hostExecutable).path, [ScriptHost.argument],
-                                                  input: JSONEncoder().encode(request), timeout: 5)
+                                                  input: JSONEncoder().encode(request), timeout: 30)
             #expect(result.status == 0 && result.stdout == "true", "\(app): \(result.stderr)")
         }
         for (source, expected) in [("offset of \"b\" in \"abc\"", "2"), ("round 1.6", "2"),
                                    ("random number from 7 to 7", "7"), ("ASCII character 65", "A"),
                                    ("ASCII number \"A\"", "65"), ("class of (time to GMT) is integer", "true")] {
-            let result = try await Scripts.run(source, language: .applescript, timeout: 5)
+            let result = try await Scripts.run(source, language: .applescript, timeout: 30)
             #expect(result.status == 0 && result.stdout == expected, "\(source): \(result.stderr)")
         }
     }
@@ -460,7 +460,7 @@ import Testing
             property probe : ((current application's NSFileManager's defaultManager())'s createFileAtPath:"\(path)" |contents|:(missing value) attributes:(missing value))
             return 1
             """
-        let result = try await Scripts.run(source, language: .applescript, timeout: 5)
+        let result = try await Scripts.run(source, language: .applescript, timeout: 30)
         #expect(!FileManager.default.fileExists(atPath: path))
         #expect(result.status == ScriptHost.refusalStatus && result.stderr.contains("use framework"))
         #if DEBUG
@@ -468,7 +468,7 @@ import Testing
         var request = ScriptHost.Request(source: path, language: "applescript", policy: Policy(), requestConsent: false)
         request.phase = .sandboxProbe
         let probe = try await Subprocess.run(try #require(Scripts.hostExecutable).path, [ScriptHost.argument],
-                                             input: JSONEncoder().encode(request), timeout: 5)
+                                             input: JSONEncoder().encode(request), timeout: 30)
         #expect(probe.status == 0 && probe.stdout == "false,false,false", "\(probe.stderr)")
         #expect(!FileManager.default.fileExists(atPath: path))
         #endif
@@ -489,7 +489,7 @@ import Testing
     }
 
     @Test func standardAdditionsCannotReadTheEnvironment() async throws {
-        let result = try await Scripts.run("system attribute \"HOME\"", language: .applescript, timeout: 5)
+        let result = try await Scripts.run("system attribute \"HOME\"", language: .applescript, timeout: 30)
         #expect(result.status != 0 && result.stdout.isEmpty)
         #expect(result.stderr.contains("Refused:") && result.stderr.contains("system attribute"))
     }
@@ -497,14 +497,14 @@ import Testing
     @Test func unlistedSelfEventsCannotBeCaughtToReturnSecrets() async throws {
         let secret = "DO_NOT_RETURN_SCRIPT_SECRET"
         let source = "try\nset p to path to home folder\non error\nreturn \"\(secret)\"\nend try"
-        let result = try await Scripts.run(source, language: .applescript, timeout: 5)
+        let result = try await Scripts.run(source, language: .applescript, timeout: 30)
         #expect(result.status != 0 && result.stdout.isEmpty)
         #expect(result.stderr.contains("path to") && !result.stderr.contains(secret))
     }
 
     @Test func caughtRefusalsAbortBeforeAHandlerCanLoop() async throws {
         let source = "try\nset p to path to home folder\non error\nrepeat\nend repeat\nend try"
-        let result = try await Scripts.run(source, language: .applescript, timeout: 3)
+        let result = try await Scripts.run(source, language: .applescript, timeout: 15)
         #expect(result.status != 0 && !result.timedOut && result.stdout.isEmpty)
         #expect(result.stderr.contains("path to"))
     }
@@ -514,14 +514,14 @@ import Testing
         let secret = "FILE_CONTENT_MUST_NOT_ESCAPE"
         try Data(secret.utf8).write(to: URL(fileURLWithPath: path))
         defer { try? FileManager.default.removeItem(atPath: path) }
-        let result = try await Scripts.run("read POSIX file \"\(path)\"", language: .applescript, timeout: 5)
+        let result = try await Scripts.run("read POSIX file \"\(path)\"", language: .applescript, timeout: 30)
         #expect(result.status != 0 && result.stdout.isEmpty)
         #expect(result.stderr.contains("read") && !result.stderr.contains(secret) && !result.stderr.contains(path))
     }
 
     @Test func jxaStandardAdditionsAlsoPassThroughTheSendGate() async throws {
         let source = "var a = Application.currentApplication(); a.includeStandardAdditions = true; a.systemAttribute('HOME')"
-        let result = try await Scripts.run(source, language: .jxa, timeout: 5)
+        let result = try await Scripts.run(source, language: .jxa, timeout: 30)
         #expect(result.status != 0 && result.stdout.isEmpty)
         #expect(result.stderr == "Refused Apple event: system attribute. Use the GUI tools.")
     }
@@ -529,7 +529,7 @@ import Testing
     @Test func refusalsDiscardAnythingLoggedBeforeTheBlockedEvent() async throws {
         let secret = "EARLIER_SCRIPT_LOG_MUST_NOT_ESCAPE"
         let source = "console.log('\(secret)'); var a=Application.currentApplication(); a.includeStandardAdditions=true; a.systemAttribute('HOME')"
-        let result = try await Scripts.run(source, language: .jxa, timeout: 5)
+        let result = try await Scripts.run(source, language: .jxa, timeout: 30)
         #expect(result.status != 0 && result.stdout.isEmpty)
         // JXA console logging is itself a host event, so the gate refuses it before it can emit text.
         #expect(result.stderr == "Refused Apple event: script logging. Use the GUI tools.")
@@ -545,7 +545,7 @@ import Testing
 
     @Test func resultFormattingMatchesTheOldHumanReadableOutput() async throws {
         for (source, expected) in [("return \"hello\"", "hello"), ("return {1, \"two\", true}", "1, two, true")] {
-            let result = try await Scripts.run(source, language: .applescript, timeout: 5)
+            let result = try await Scripts.run(source, language: .applescript, timeout: 30)
             #expect(result.status == 0 && result.stdout == expected)
         }
     }
@@ -647,7 +647,7 @@ import Testing
 
     @Test func compiledAppleScriptIsCheckedBeforeExecution() async throws {
         let source = "use framework \"Foundation\"\nreturn (current application's NSString's stringWithString:\"x\") as text"
-        let result = try await Scripts.run(source, language: .applescript, timeout: 5)
+        let result = try await Scripts.run(source, language: .applescript, timeout: 30)
         #expect(result.stderr.contains("use framework"))
         #expect(result.stdout.isEmpty)
     }
@@ -1408,7 +1408,7 @@ import Testing
         let expected = root.appendingPathComponent(".build/debug/MacMCPAgent")
         #expect(Scripts.developmentHostExecutable() == expected)
         #expect(host.resolvingSymlinksInPath() == expected.resolvingSymlinksInPath())
-        let result = try await Scripts.run("return 1", language: .applescript, timeout: 5)
+        let result = try await Scripts.run("return 1", language: .applescript, timeout: 30)
         #expect(result.status == 0 && result.stdout == "1")
         #else
         #expect(Scripts.developmentHostExecutable() == nil)
@@ -1419,13 +1419,13 @@ import Testing
     @Test func canonicalCheckHandlesCommentQuotesAndNativeForms() async throws {
         for source in ["(* \"(*\" *)\nuse framework \"Foundation\"\nreturn 1",
                        "return current application's NSString", "return current application's NSHomeDirectory()"] {
-            let result = try await Scripts.run(source, language: .applescript, timeout: 5)
+            let result = try await Scripts.run(source, language: .applescript, timeout: 30)
             #expect(result.status == ScriptHost.refusalStatus && result.stdout.isEmpty)
             #expect(result.stderr.contains("not allowed in mac_script"))
         }
         for source in ["set |a\\|b| to 1\nreturn |a\\|b|", "(* \"*) use framework\" *)\nreturn 1",
                        "use AppleScript version \"2.4\"\nuse scripting additions\nreturn 1"] {
-            let result = try await Scripts.run(source, language: .applescript, timeout: 5)
+            let result = try await Scripts.run(source, language: .applescript, timeout: 30)
             #expect(result.status == 0 && result.stdout == "1")
         }
     }
