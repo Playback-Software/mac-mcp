@@ -46,6 +46,8 @@ MacMCP is in early development, so tools and policy keys may change before 1.0.
   server and Accessibility to list the same number of windows, and macOS 27 adds offscreen helper windows to every
   app. The check now matches each window to its Accessibility element by window ID, and skips only offscreen helper
   windows whose title is present and empty (read with Screen Recording); a document window always has a title.
+- `mac_script` refused every reference to an app's documents or Safari's tabs: the document gate's own inventory
+  query encoded "every" with the wrong descriptor type, so apps rejected it. The gate now works as documented.
 - `mac_menu` accepts a path sent as a JSON array inside a string (`"[\"File\", \"Save As…\"]"`).
 
 ### Documentation
