@@ -734,11 +734,9 @@ func setup(_ args: [String]) -> Never {
 var args = Array(CommandLine.arguments.dropFirst())
 let command = args.isEmpty ? "relay" : args.removeFirst()
 switch command {
-case "--background":
-    guard args.isEmpty else { fail("usage: mac-mcp [relay] [--background]") }
-    relay(background: true)
-case "relay":
-    relay(background: args.contains("--background"))
+case "--background", "relay":
+    do { relay(background: try RelayOptions(command == "--background" ? [command] + args : args).background) }
+    catch { fail("\(error)") }
 case "doctor":
     doctor()
 case "call":

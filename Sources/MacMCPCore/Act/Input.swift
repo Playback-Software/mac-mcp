@@ -270,6 +270,8 @@ public enum Input {
     /// `replacing`: ⌘A was just sent to select what the text replaces. A newline or tab in the text is sent as Return or
     /// Tab, each checked as a key of one call with the text before it (see `OpenRoutes.typedKeys`).
     public static func type(_ text: String, pid: pid_t? = nil, replacing: Bool = false) async throws {
+        if BackgroundMode.enabled, let keys = OpenRoutes.typedKeys(text, replacing: replacing),
+           let refusal = BackgroundMode.keySequenceRefusal(keys, repeat: 1) { throw ActionError(refusal) }
         try await sequence {
             var buffer = ""
             func flush() async throws {
@@ -316,6 +318,7 @@ public enum Input {
 
     public static func press(_ spec: KeySpec, repeat count: Int = 1, pid: pid_t? = nil) async throws {
         if BackgroundMode.enabled, let refusal = BackgroundMode.keyRefusal(spec) { throw ActionError(refusal) }
+        if BackgroundMode.enabled, let refusal = BackgroundMode.keySequenceRefusal([spec], repeat: max(1, count)) { throw ActionError(refusal) }
         try await sequence {
             for _ in 0..<max(1, count) {
                 try await check(pid: pid, keyboard: true, route: .key(spec, pid: pid))

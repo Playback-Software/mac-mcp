@@ -7,7 +7,6 @@ extension Actions {
     /// pointer semantics and cannot be represented by a single accessibility action.
     static func backgroundClickAction(button: Input.Button, count: Int, modifiers: CGEventFlags, actions: [String]) -> String? {
         guard count == 1, modifiers.isEmpty else { return nil }
-        if button == .right { return actions.contains(kAXShowMenuAction) ? kAXShowMenuAction : nil }
         guard button == .left else { return nil }
         return [kAXPressAction, kAXPickAction].first { actions.contains($0) }
     }
@@ -52,12 +51,16 @@ extension Actions {
 
     static func backgroundClick(_ r: Resolved, button: Input.Button, count: Int, modifiers: CGEventFlags) async throws -> String {
         guard let element = r.element else { throw ActionError(BackgroundMode.refusal("click coordinates or screenshot pixels")) }
+        if let refusal = BackgroundMode.actionRefusal(button == .right ? kAXShowMenuAction : kAXPressAction, role: element.role)
+            ?? BackgroundMode.menuRefusal(element) {
+            throw ActionError(refusal)
+        }
         guard let action = backgroundClickAction(button: button, count: count, modifiers: modifiers, actions: element.actionNames) else {
             throw ActionError(BackgroundMode.refusal("click this control without pointer input; try an AX button or mac_menu"))
         }
         try await checkBackground(element, pid: r.pid, row: r.row)
         switch pressOutcome(element.perform(action), cancelled: Task.isCancelled) {
-        case .pressed: return "accessibility " + (action == kAXShowMenuAction ? "show-menu" : action == kAXPickAction ? "pick" : "press")
+        case .pressed: return "accessibility " + (action == kAXPickAction ? "pick" : "press")
         case .unanswered: return "accessibility action unverified (the app did not reply; inspect the snapshot before retrying)"
         case .failed: throw ActionError(BackgroundMode.refusal("complete this accessibility action; no foreground fallback was sent"))
         }
@@ -73,46 +76,17 @@ extension Actions {
         let row = try await backgroundRow(field, row: r?.row)
         return try await BackgroundMode.$row.withValue(row) {
             try await BackgroundMode.$target.withValue(field) {
-                try await checkBackground(field, pid: pid, row: row)
-                let original = field.string(kAXValueAttribute)
-                let selection = field.attribute(kAXSelectedTextRangeAttribute) as? CFRange
-                let expected = expectedTypedValue(original: original, text: text, mode: mode, selection: selection)
                 try await ActionRoute.validate(.typing(text, mode: mode, pid: pid))
-
-                let valueSettable = field.isSettable(kAXValueAttribute)
-                let selectedSettable = field.isSettable(kAXSelectedTextAttribute)
-                if let expected, valueSettable {
-                    try await checkBackground(field, pid: pid, row: row)
-                    guard field.set(kAXValueAttribute, expected) == .success else {
-                        throw ActionError(BackgroundMode.refusal("confirm the AX value write; it may have applied, so inspect the field before retrying"))
-                    }
-                } else if selectedSettable, let original, mode != .insert || expected != nil {
-                    if mode != .insert {
-                        try await checkBackground(field, pid: pid, row: row)
-                        try setBackgroundRange(field, location: mode == .append ? original.utf16.count : 0,
-                                               length: mode == .replace ? original.utf16.count : 0)
-                    }
-                    try await checkBackground(field, pid: pid, row: row)
-                    guard field.set(kAXSelectedTextAttribute, text) == .success else {
-                        throw ActionError(BackgroundMode.refusal("confirm the AX selected-text write; inspect the field before retrying"))
-                    }
-                } else {
-                    try await Input.check(pid: pid, keyboard: true)
-                    if mode == .replace { try await Input.press(try KeySpec.parse("cmd+a"), pid: pid) }
-                    if mode == .append {
-                        guard let original else { throw ActionError(BackgroundMode.refusal("place an unreadable caret at the end")) }
-                        try await checkBackground(field, pid: pid, row: row)
-                        try setBackgroundRange(field, location: original.utf16.count, length: 0)
-                    }
-                    try await Input.type(text, pid: pid, replacing: mode == .replace)
-                }
-                try await Task.sleep(for: .milliseconds(100))
-                let verified = try await verifyAndSubmit(value: field.string(kAXValueAttribute), expected: expected,
-                        typedCount: text.count, submit: submit, previouslyReadable: original != nil) {
-                    try await Input.press(try KeySpec.parse("return"), pid: pid)
-                }
-                return "typed \(text.count) characters; " + (verified ? "field value verified" : "unverified (field value or caret unavailable)")
-                    + (submit ? "; Return sent to the app, delivery unverified; inspect the diff" : "")
+                let access = BackgroundTextField(value: { field.string(kAXValueAttribute) },
+                        selection: { field.attribute(kAXSelectedTextRangeAttribute) as? CFRange },
+                        isSettable: { field.isSettable($0) }, set: { field.set($0, $1) },
+                        setRange: { try setBackgroundRange(field, location: $0.location, length: $0.length) })
+                let input = BackgroundTypingInput(check: { try await checkBackground(field, pid: pid, row: row) },
+                        keyboardCheck: { try await Input.check(pid: pid, keyboard: true) },
+                        submitCheck: { try await Input.check(pid: pid, keyboard: true, route: .key(KeySpec(key: 36, flags: []), pid: pid)) },
+                        press: { try await Input.press($0, pid: pid) },
+                        type: { try await Input.type($0, pid: pid, replacing: mode == .replace) })
+                return try await backgroundEdit(access, input: input, text: text, mode: mode, submit: submit)
             }
         }
     }
@@ -126,6 +100,7 @@ extension Actions {
 
     static func backgroundKeys(_ specs: [KeySpec], repeat count: Int, pid: pid_t) async throws {
         for spec in specs { if let refusal = BackgroundMode.keyRefusal(spec) { throw ActionError(refusal) } }
+        if let refusal = BackgroundMode.keySequenceRefusal(specs, repeat: count) { throw ActionError(refusal) }
         guard let field = AXElement.application(pid: pid).element(kAXFocusedUIElementAttribute) else {
             throw ActionError(BackgroundMode.refusal("read this app's own focused element; use an AX ref"))
         }

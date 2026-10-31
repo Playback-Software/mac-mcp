@@ -804,7 +804,12 @@ public enum Actions {
             AXElement.application(pid: pid).element(kAXMenuBarAttribute)?.elements(kAXChildrenAttribute).first?.perform(kAXCancelAction)
             throw ActionError("Menu item \(Untrusted.inline(walked.joined(separator: " > "))) is disabled right now.")
         }
-        if BackgroundMode.enabled { try await checkBackground(target, pid: pid) }
+        if BackgroundMode.enabled {
+            if let refusal = BackgroundMode.actionRefusal(kAXPressAction, role: target.role) ?? BackgroundMode.menuRefusal(target) {
+                throw ActionError(refusal)
+            }
+            try await checkBackground(target, pid: pid)
+        }
         try await Input.check(pid: pid, route: .target(target, point: nil, pid: pid, opens: false))
         guard target.perform(kAXPressAction) == .success else {
             if BackgroundMode.enabled {

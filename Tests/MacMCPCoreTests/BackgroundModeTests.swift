@@ -24,23 +24,24 @@ private final class BackgroundTape: @unchecked Sendable {
     @Test func routingDoesNotRepresentMouseSemanticsWithAX() {
         #expect(Actions.backgroundClickAction(button: .left, count: 1, modifiers: [], actions: [kAXPressAction]) == kAXPressAction)
         #expect(Actions.backgroundClickAction(button: .left, count: 1, modifiers: [], actions: [kAXPickAction]) == kAXPickAction)
-        #expect(Actions.backgroundClickAction(button: .right, count: 1, modifiers: [], actions: [kAXShowMenuAction]) == kAXShowMenuAction)
+        #expect(Actions.backgroundClickAction(button: .right, count: 1, modifiers: [], actions: [kAXShowMenuAction]) == nil)
         #expect(Actions.backgroundClickAction(button: .left, count: 2, modifiers: [], actions: [kAXPressAction]) == nil)
         #expect(Actions.backgroundClickAction(button: .left, count: 1, modifiers: .maskCommand, actions: [kAXPressAction]) == nil)
         #expect(Actions.backgroundClickAction(button: .middle, count: 1, modifiers: [], actions: [kAXPressAction]) == nil)
         #expect(Actions.backgroundClickAction(button: .left, count: 1, modifiers: [], actions: []) == nil)
     }
 
-    @Test(arguments: ["AXFocused", "AXFrontmost", "AXMain", "AXMinimized", "AXPosition", "AXSize"])
+    @Test(arguments: ["AXFocused", "AXFrontmost", "AXMain", "AXMinimized", "AXPosition", "AXSize", "AXSelected"])
     func focusAndWindowWritesAreExcluded(_ name: String) { #expect(!BackgroundMode.allows(attribute: name)) }
 
     @Test func onlyBackgroundAXRoutesAreAdmitted() {
-        for name in [kAXValueAttribute, kAXSelectedAttribute, kAXSelectedTextRangeAttribute, kAXSelectedTextAttribute] {
+        for name in [kAXValueAttribute, kAXSelectedTextRangeAttribute, kAXSelectedTextAttribute] {
             #expect(BackgroundMode.allows(attribute: name))
         }
-        for name in [kAXPressAction, kAXPickAction, kAXShowMenuAction, kAXIncrementAction, kAXDecrementAction, "AXScrollToVisible"] {
+        for name in [kAXPressAction, kAXPickAction, "AXScrollToVisible"] {
             #expect(BackgroundMode.allows(action: name))
         }
+        for name in [kAXShowMenuAction, kAXIncrementAction, kAXDecrementAction] { #expect(!BackgroundMode.allows(action: name)) }
         #expect(!BackgroundMode.allows(action: kAXRaiseAction))
         #expect(!BackgroundMode.allows(action: "arbitrary action"))
     }
@@ -66,8 +67,62 @@ private final class BackgroundTape: @unchecked Sendable {
         }
     }
 
-    @Test(arguments: ["cmd+tab", "cmd+grave", "cmd+q", "cmd+h", "ctrl+left", "f5", "fn+a"])
+    @Test(arguments: ["cmd+tab", "cmd+grave", "cmd+q", "cmd+h", "ctrl+left", "f5", "fn+a", "ctrl+cmd+f",
+                      "cmd+m", "alt+cmd+m", "alt+cmd+esc", "cmd+w", "cmd+c", "cmd+x"])
     func systemFocusShortcutsAreRefused(_ spec: String) throws { #expect(BackgroundMode.keyRefusal(try KeySpec.parse(spec)) != nil) }
+
+    @Test func relayRejectsMisspelledOrExtraArguments() throws {
+        #expect(try !RelayOptions([]).background)
+        #expect(try RelayOptions(["--background"]).background)
+        for arguments in [["--backgroud"], ["--background", "extra"], ["--background=false"], ["--background", "--background"]] {
+            #expect(throws: RelayOptions.ParseError.self) { try RelayOptions(arguments) }
+        }
+        do {
+            _ = try RelayOptions(["--backgroud"])
+            Issue.record("typo was accepted")
+        } catch { #expect(String(describing: error).contains("unknown relay argument '--backgroud'")) }
+    }
+
+    @Test func menuOpeningActionsRefuseButLeafPressesRemainAvailable() {
+        #expect(BackgroundMode.actionRefusal(kAXShowMenuAction, role: kAXTextFieldRole)?.contains("mac_menu") == true)
+        for role in [kAXMenuBarItemRole, kAXPopUpButtonRole, "AXMenuButton"] {
+            #expect(BackgroundMode.actionRefusal(kAXPressAction, role: role)?.contains("without --background") == true)
+        }
+        for role in [kAXMenuItemRole, kAXButtonRole, kAXCheckBoxRole] {
+            #expect(BackgroundMode.actionRefusal(kAXPressAction, role: role) == nil)
+        }
+    }
+
+    @Test func activationAfterFocusMovementRefusesTheWholeCallIncludingRepeats() throws {
+        for first in ["tab", "shift+tab", "left", "right", "up", "down", "return", "home", "end", "pagedown", "esc"] {
+            for last in ["space", "return", "enter"] {
+                let keys = try [first, "a", last].map(KeySpec.parse)
+                #expect(BackgroundMode.keySequenceRefusal(keys, repeat: 1) != nil)
+            }
+        }
+        #expect(BackgroundMode.keySequenceRefusal(try ["space", "tab"].map(KeySpec.parse), repeat: 2) != nil)
+        #expect(BackgroundMode.keySequenceRefusal(try ["return"].map(KeySpec.parse), repeat: 2) != nil)
+        #expect(BackgroundMode.keySequenceRefusal(try ["a", "return"].map(KeySpec.parse), repeat: 1) == nil)
+        #expect(BackgroundMode.keySequenceRefusal(try ["tab", "a"].map(KeySpec.parse), repeat: 1) == nil)
+        #expect(BackgroundMode.keySequenceRefusal(try ["tab", "return"].map(KeySpec.parse), repeat: 0) == nil)
+    }
+
+    @Test func dangerousBackgroundKeysRefuseBeforeAnyGuardOrEvent() async throws {
+        let tape = BackgroundTape()
+        let environment = Input.Environment(check: { _, _ in Issue.record("refused key reached guard") }, post: { tape.post($0) },
+                                             postToPID: { tape.post($0, pid: $1) })
+        await BackgroundMode.$enabled.withValue(true) {
+            await Input.$environment.withValue(environment) {
+                for key in ["cmd+c", "cmd+x", "cmd+w", "ctrl+cmd+f", "cmd+m", "alt+cmd+esc"] {
+                    await #expect(throws: ActionError.self) { try await Input.press(try KeySpec.parse(key), pid: 42) }
+                }
+                await #expect(throws: ActionError.self) { try await Input.press(try KeySpec.parse("return"), repeat: 2, pid: 42) }
+                await #expect(throws: ActionError.self) { try await Actions.keys(try ["tab", "space"].map(KeySpec.parse), repeat: 1, pid: 42) }
+                await #expect(throws: ActionError.self) { try await Input.type("\t ", pid: 42) }
+            }
+        }
+        #expect(tape.all.isEmpty)
+    }
 
     @Test(arguments: [false, true])
     func keyboardSinkMatchesSessionMode(_ background: Bool) async throws {

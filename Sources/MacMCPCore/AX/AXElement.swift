@@ -156,6 +156,8 @@ public struct AXElement: @unchecked Sendable, Hashable {
     public func perform(_ action: String) -> AXError {
         guard AgentSafety.refusal(pid: pid) == nil else { return .cannotComplete }
         guard !BackgroundMode.enabled || BackgroundMode.allows(action: action) else { return .cannotComplete }
+        if BackgroundMode.enabled, BackgroundMode.actionRefusal(action, role: role) != nil
+            || BackgroundMode.menuRefusal(self) != nil { return .cannotComplete }
         return Self.mutate { AXUIElementPerformAction(raw, action as CFString) }
     }
 

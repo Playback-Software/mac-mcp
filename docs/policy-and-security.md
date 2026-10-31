@@ -207,15 +207,38 @@ ProtectedPaths already blocks edits to the MCP clients' settings. The relay stri
 its own immutable mode after reconnecting; the agent reads it only before JSON-RPC starts. A direct socket client
 can choose its mode, as it can already run code as the account; this does not authenticate a human at the socket.
 Enabled sessions identify themselves in instructions, tool results and `mac_doctor`.
+Unknown relay arguments are errors, so a misspelled `--background` cannot silently select foreground mode.
 
 The mode forbids MacMCP activation, window focusing/raising, pointer input and system-wide HID events. AX actions,
 value/selection writes and window-filter captures are available; PID-targeted keys require exact app-local focus
 and same-process window ownership. Remote helpers and unknown focus refuse instead of using system focus. Key
 delivery is unverified unless an observable result confirms it; typing always reads its resulting value back.
+Append/insert use AXSelectedTextRange plus AXSelectedText when both are settable; only replace may write the whole
+AXValue. Keyboard fallback requires exact app-local focus. Unreadable values or insertion carets and concurrent
+value/selection changes refuse; read-back must match the expected edit. `submit=true` checks Return delivery before
+any write. If Return later fails, the result says the text was written and submission is unconfirmed, rather than
+reporting the whole edit as refused.
+
 There is no foreground retry. Unsupported routes explain background mode and ask for an AX route or for the person
 to configure a foreground client. Finder and file-panel mutations, secure fields, window controls/management,
 clipboard writes, scripts, running Shortcuts and Safari automation are conservatively unavailable. Launching is
 allowed without activation, but opening URLs/files through launch is refused. See [Tools](tools.md#background-mode).
+
+Background key rules refuse ⌘Tab, ⌘grave, ⌘Q, ⌘H, ⌃⌘F, ⌘M, ⌥⌘M, ⌥⌘Esc, ⌘W, ⌘C and ⌘X,
+including chords with additional modifiers; all F1–F20 keys, any Fn-modified key and Control-arrow keys also refuse.
+In one call (including repeats), Space, Return or Enter cannot follow Tab, an arrow, Home, End, Page Up, Page Down,
+Escape, Space, Return or Enter. Inspect a snapshot and send a separate call after a focus-moving key.
+
+Background menu rules refuse Copy/Cut; close, minimize, zoom and full-screen commands; Hide, Hide Others, Quit and
+Force Quit; and every Window-menu command, including moving, resizing, tiling, arranging and switching windows or
+Spaces. These checks use AX identifiers and exposed action/selector metadata; titles are fallbacks only when an
+identifier is absent. A menu item's key equivalent is not a typed shortcut and does not invoke the background key
+rules. Existing foreground menu policy checks still apply. `mac_clipboard action=set` also refuses.
+
+AXShowMenu and AXPress on menu-bar items, pop-up buttons, menu buttons and submenu parents refuse because they can
+leave an inactive app tracking a menu and taking the person's keyboard. Use `mac_menu` for an already exposed leaf
+command, or ask a person to reconnect without `--background`. AXSelected writes and AXIncrement/AXDecrement actions
+are excluded from the background AX allowlist.
 
 | Existing guard | Background enforcement |
 | --- | --- |

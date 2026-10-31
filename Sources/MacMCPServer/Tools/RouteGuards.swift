@@ -157,7 +157,7 @@ enum RouteGuards {
         if let blocked = Actions.modalBlocker(of: element, pid: pid) { return blocked }
         if element == BackgroundMode.target, let row = BackgroundMode.row,
            let r = Actions.backgroundIdentityRefusal(element, row: row) { return r }
-        if let key = OpenRoutes.menuKey(element), let r = BackgroundMode.keyRefusal(key) { return r }
+        if let r = BackgroundMode.actionRefusal(kAXPressAction, role: element.role) ?? BackgroundMode.menuRefusal(element) { return r }
         return nil
     }
 

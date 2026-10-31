@@ -93,18 +93,31 @@ For how the `web_*` tools work, see [Architecture](architecture.md#web-tools).
 A person opts in for each client by configuring its relay as `mac-mcp --background` (or `mac-mcp relay --background`).
 There is no tool argument to enable or disable it. The connection's instructions, each tool result and `mac_doctor`
 show the mode. Without the flag, the existing foreground routes are unchanged.
+Unknown relay arguments are errors, so a misspelled `--background` cannot silently select foreground mode.
 
 | Operation | In background mode |
 | --- | --- |
 | `mac_snapshot`, AX waits and action diffs | Read the target app's tree; pass `app=` or use a shown ref |
-| `mac_click ref=` | One unmodified AXPress or AXPick, or right-click via AXShowMenu; no mouse fallback |
-| `mac_type` | Writes AXValue or AXSelectedText/AXSelectedTextRange, then reads the value back; never sets focus |
-| `mac_key`, typing fallback, `submit=true` | Keys go only to the target PID, while its own AXFocusedUIElement is exactly the pinned element and its window belongs to that PID; unreadable, changed or remote focus refuses. Key delivery is reported as unverified; inspect the diff |
+| `mac_click ref=` | One unmodified AXPress or AXPick; no mouse fallback. AXShowMenu and AXPress on menu-bar items, pop-up buttons, menu buttons and submenu parents refuse; use `mac_menu` for an exposed leaf command |
+| `mac_type` | Append/insert use AXSelectedTextRange plus AXSelectedText when both are settable; only replace may write the whole AXValue. Otherwise keys require exact app-local focus. Unreadable values or insertion carets and concurrent value/selection changes refuse. The resulting value must match the expected edit; never sets focus |
+| `mac_key`, typing fallback, `submit=true` | Keys go only to the target PID, while its own AXFocusedUIElement is exactly the pinned element and its window belongs to that PID; unreadable, changed or remote focus refuses. `submit=true` checks Return delivery before writing. If Return later fails, the result says the text was written and submission is unconfirmed. Key delivery is unverified; inspect the diff |
 | `mac_menu` | Presses an already exposed menu item in the target app without activation, then reads its state; refuses discovery that needs opening a menu or dismissing another menu |
 | `mac_scroll to_ref=` | AXScrollToVisible with a visibility check; no wheel fallback |
 | `mac_screenshot app=`, OCR, OCR waits | ScreenCaptureKit window filter, including covered pixels; capture failures refuse instead of cropping a display |
 | `mac_app action=launch` | Launches without activation; `open=` is refused |
 | Other routes | Coordinates and screenshot pixels, modified/multiple clicks, drags, hover, wheel scrolling, app switching, app/window management and window controls refuse. Finder actions, file panels, remote AX receivers, secure fields, scripts, running Shortcuts, all `web_*` calls and clipboard writes refuse too |
+
+Background key rules refuse ⌘Tab, ⌘grave, ⌘Q, ⌘H, ⌃⌘F, ⌘M, ⌥⌘M, ⌥⌘Esc, ⌘W, ⌘C and ⌘X,
+including chords with additional modifiers; all F1–F20 keys, any Fn-modified key and Control-arrow keys also refuse.
+In one call (including repeats), Space, Return or Enter cannot follow Tab, an arrow, Home, End, Page Up, Page Down,
+Escape, Space, Return or Enter. Inspect a snapshot and send a separate call after a focus-moving key.
+
+Background menu rules refuse Copy/Cut; close, minimize, zoom and full-screen commands; Hide, Hide Others, Quit and
+Force Quit; and every Window-menu command, including moving, resizing, tiling, arranging and switching windows or
+Spaces. These checks use AX identifiers and exposed action/selector metadata; titles are fallbacks only when an
+identifier is absent. A menu item's key equivalent is not a typed shortcut and does not invoke the background key
+rules. Existing foreground menu policy checks still apply. `mac_clipboard action=set` also refuses.
+AXSelected writes and AXIncrement/AXDecrement actions are excluded from the background AX allowlist.
 
 Keep a separate foreground connection for tasks needing those routes, or ask a person to reconnect this client
 without `--background`. No call silently changes modes. Display capture needs `app=` in background mode; display
