@@ -97,7 +97,8 @@ extension Integration {
             // A distinct utility panel owns the app's insertion point; the Name field is still AX-writable.
             try hostURL("route-floating")
             defer { try? hostURL("dismiss") }
-            let focused = try agent().call("mac_type", ["ref": try refFor("textfield \"routeFloatingField\""), "text": "panel focus"])
+            // The floating panel is its own window, so look across the app (as RouteGuardTests does).
+            let focused = try agent().call("mac_type", ["ref": try refFor("\"routeFloatingField\"", ["scope": "app"]), "text": "panel focus"])
             try #require(!focused.isError, "\(focused.text)")
             let client = try AgentClient(clientName: "integration-tests-background", version: "1", timeout: 90, background: true)
             let snapshot = try client.call("mac_snapshot", ["app": hostApp, "scope": "app", "query": "Name"]).text
