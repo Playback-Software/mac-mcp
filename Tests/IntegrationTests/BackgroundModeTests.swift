@@ -21,6 +21,10 @@ extension Integration {
             try closeMenus()
             try hostURL("dismiss")
             try hostURL("reset")
+            // Append can only reach the field with the app's keyboard focus (without it, keys would go to whatever
+            // has focus, maybe a password field, and are refused). Put focus in Name first, in the foreground.
+            let focus = try agent().call("mac_click", ["ref": try refFor("textfield \"Name\"")])
+            try #require(!focus.isError, "\(focus.text)")
             let client = try AgentClient(clientName: "integration-tests-background", version: "1", timeout: 90, background: true)
             let snapshot = try client.call("mac_snapshot", ["app": hostApp]).text
             let name = try #require(ref(of: "textfield \"Name\"", in: snapshot))
