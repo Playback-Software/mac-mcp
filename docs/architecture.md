@@ -30,6 +30,49 @@ messages to 256 frames / 32 MiB and outstanding requests to 256 / 32 MiB of requ
 `-32603`; notifications never receive responses. Relay stdout has no write timeout: SSH and stdio apply
 backpressure for as long as the client needs, and a closed client is detected by EPIPE.
 
+## Background client sessions
+
+`mac-mcp --background` and `mac-mcp relay --background` add `background=true` to the relay-owned preamble.
+The relay retains the same directive across reconnects and strips client-supplied directive lines, including while
+reconnecting. The agent accepts the preamble only before the first JSON-RPC frame. Once set, the connection flag
+cannot be cleared by another preamble. Initialize parameters, stateless metadata and tool arguments cannot change
+it. Direct socket clients such as integration tests can opt in through `AgentClient(background: true)`; access to
+that socket already requires code running as the account. This is the same person/code-execution boundary as the
+client configuration, which ProtectedPaths denies to GUI agents.
+
+Each request captures the flag in `RequestContext`. `BackgroundMode` carries it and the intended field through the
+action pipeline as task-local values; native guard workers explicitly restore them. Concurrent clients keep their
+own mode. Initialize/discovery instructions and every tool result identify enabled background sessions, and
+`mac_doctor` reports enabled/off for its calling session. Normal sessions take the existing branches.
+
+Background actions retain the action lock and admission pipeline. They use AXPress/AXPick/AXShowMenu and direct
+text writes, never AXFocused, AXRaise, AXMain or AXFrontmost. A final AX adapter allowlist blocks focus/window writes
+and other actions even if a higher-level check misses them. Accessibility enabling flags remain available for
+reading Electron and similar trees. Ownership requires the target PID's window or attached menu tree. Remote
+children, Finder and file-panel actions refuse. Explicit typing fields replace app focus in text route checks, so
+path, selection, paste and commit checks see the field being changed.
+
+When AX cannot type, keyboard sequences pin the app's own focused element and require its PID and window PID to
+match the target before every step, including after route checks. They never infer delivery from system-wide
+focus or the frontmost application. Events and paired key/modifier cleanup use `CGEvent.postToPid`; the background
+event adapter cannot post to the HID tap and discards pointer events. Changed/unreadable focus, Secure Input or a
+prompt stops input. Key results say delivery is unverified; text results retain full value readback. No failed AX
+write is retried with keys when it may already have applied.
+
+Settle signatures in this mode omit the person's frontmost app and unrelated pop-up windows, and fall back to the
+target's main/first AX window when it has no focused window. Before/after snapshots and diffs remain pinned to the
+target PID. Capture uses ScreenCaptureKit's desktop-independent window filter and disables the display-crop
+fallback; OCR consumes those same window pixels. Launch requests force `OpenConfiguration.activates = false`.
+Tools that dispatch effects outside these adapters (scripts, running Shortcuts and Safari automation) refuse, as
+do window management and shared clipboard writes. See [the route table](tools.md#background-mode).
+
+Inactive apps may reject AX actions or ignore targeted key events. AX and PID checks are cooperative boundaries,
+not an atomic transaction with the app's main thread or a person's concurrent input. A target app can itself open
+UI or choose to activate when processing an AX command; integration validation must check this for supported
+apps/OS versions. `Tests/IntegrationTests/BackgroundModeTests.swift` exercises TestHost typing, Submit and menu
+commands with Finder frontmost, unchanged pointer/frontmost assertions, input refusals and window capture/OCR.
+Those tests require the parent-run GUI harness and are excluded from unit checks.
+
 ## Refs and ids
 
 `RefStore` hands out element refs (`e12`) and keeps them stable across snapshots: the same accessibility object keeps
@@ -294,7 +337,7 @@ reported as exit 1. A call cancelled before it spawns never spawns.
 
 | Command | What it does |
 | --- | --- |
-| `mac-mcp` / `mac-mcp relay` | stdio ⇄ agent socket (what MCP clients run); reconnects if the agent restarts |
+| `mac-mcp` / `mac-mcp relay` (`--background` to opt this client in) | stdio ⇄ agent socket (what MCP clients run); reconnects if the agent restarts |
 | `mac-mcp doctor` | Health report; falls back to local checks if the agent is unreachable |
 | `mac-mcp setup` | Guided first run at the Mac: session and agent checks, then the Accessibility and Screen Recording grants, the doctor's report, and an offer to add MacMCP to a client. See [Setup](#setup) |
 | `mac-mcp install --client NAME` / `uninstall --client NAME` | Add MacMCP to an AI client's MCP config, or take it out: `[--name mac] [--remote user@host] [--dry-run] [--create]`. See [Registering clients](#registering-clients) |

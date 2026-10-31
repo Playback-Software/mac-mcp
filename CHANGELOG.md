@@ -7,6 +7,10 @@ MacMCP is in early development, so tools and policy keys may change before 1.0.
 
 ### Added
 
+- Per-client `mac-mcp --background` opt-in: AX actions and verified text writes, guarded PID-targeted keys,
+  nonactivating app launches and window-filter screenshots/OCR. Pointer/foreground fallbacks and unsupported
+  guard contexts refuse; instructions, tool results and `mac_doctor` identify the mode.
+
 - A kill switch for the person at the Mac: ⌃⇧⌘\ (or the menu bar item's "Stop and pause agents", or `mac-mcp pause`)
   stops the running action and pauses agents. Only `mac-mcp resume` in Terminal resumes. A menu bar item shows when
   an agent is driving; `--hide-indicator` hides it. The pause state survives restarts.

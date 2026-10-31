@@ -88,6 +88,30 @@ snapshot whose labels or values couldn't be read says so in a note. See
 
 For how the `web_*` tools work, see [Architecture](architecture.md#web-tools).
 
+## Background mode
+
+A person opts in for each client by configuring its relay as `mac-mcp --background` (or `mac-mcp relay --background`).
+There is no tool argument to enable or disable it. The connection's instructions, each tool result and `mac_doctor`
+show the mode. Without the flag, the existing foreground routes are unchanged.
+
+| Operation | In background mode |
+| --- | --- |
+| `mac_snapshot`, AX waits and action diffs | Read the target app's tree; pass `app=` or use a shown ref |
+| `mac_click ref=` | One unmodified AXPress or AXPick, or right-click via AXShowMenu; no mouse fallback |
+| `mac_type` | Writes AXValue or AXSelectedText/AXSelectedTextRange, then reads the value back; never sets focus |
+| `mac_key`, typing fallback, `submit=true` | Keys go only to the target PID, while its own AXFocusedUIElement is exactly the pinned element and its window belongs to that PID; unreadable, changed or remote focus refuses. Key delivery is reported as unverified; inspect the diff |
+| `mac_menu` | Presses an already exposed menu item in the target app without activation, then reads its state; refuses discovery that needs opening a menu or dismissing another menu |
+| `mac_scroll to_ref=` | AXScrollToVisible with a visibility check; no wheel fallback |
+| `mac_screenshot app=`, OCR, OCR waits | ScreenCaptureKit window filter, including covered pixels; capture failures refuse instead of cropping a display |
+| `mac_app action=launch` | Launches without activation; `open=` is refused |
+| Other routes | Coordinates and screenshot pixels, modified/multiple clicks, drags, hover, wheel scrolling, app switching, app/window management and window controls refuse. Finder actions, file panels, remote AX receivers, secure fields, scripts, running Shortcuts, all `web_*` calls and clipboard writes refuse too |
+
+Keep a separate foreground connection for tasks needing those routes, or ask a person to reconnect this client
+without `--background`. No call silently changes modes. Display capture needs `app=` in background mode; display
+listing remains available. Covered windows work, but minimized windows and windows on another Space can still be
+unavailable. Apps may ignore AX writes, menu presses or PID-targeted keys while inactive; successful AX IPC alone
+does not prove a command's effect. Typing still verifies its value and actions still return target-app diffs.
+
 ## Scripts
 
 `mac_script source='tell application "TextEdit" to get name'` needs TextEdit in `script.allowed_apps` and macOS
