@@ -210,6 +210,7 @@ Early development: tools and policy keys may still change before 1.0.
 | [Tools](docs/tools.md) | Tool reference and an example snapshot |
 | [Architecture](docs/architecture.md) | Agent and relay design, protocol layer, web tools, health checks, GUI sharing, signing |
 | [Policy and security](docs/policy-and-security.md) | `policy.json` options and the security model |
+| [Benchmarks](docs/benchmarks.md) | Agent task results with Claude Haiku 5.5, and action timings |
 | [Development and testing](docs/testing/development.md) | Unit, integration and soak tests, the TestHost app, and the agent task suite |
 | [Contributing](CONTRIBUTING.md) | Building, testing, linting and style |
 | [Changelog](CHANGELOG.md) | What changed in each release |
