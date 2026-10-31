@@ -440,9 +440,9 @@ public enum Snapshot {
         n.children = n.children.enumerated().filter { !consumed.contains($0.offset) }.map(\.element)
     }
 
-    /// Renders rows within a token budget (~4 characters per token). Returns the text and how many rows were cut.
+    /// Prefix rendering for query results and waits, where every row is already a match.
     public static func render(_ rows: [Row], frames: Bool, maxTokens: Int) -> (text: String, omitted: Int) {
-        let budget = max(200, maxTokens) * 4
+        let budget = max(200, min(maxTokens, Int.max / 4)) * 4
         var out: [String] = []
         var used = 0
         for (i, row) in rows.enumerated() {

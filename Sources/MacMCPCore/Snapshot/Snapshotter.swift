@@ -47,7 +47,7 @@ public struct SnapshotResult: Sendable {
     /// screen and follows the block.
     public var notes: [String] = []
     public var stats = WalkStats()
-    /// The rows that made it into `text` (the token budget can cut the rest), as rendered.
+    /// The rows actually rendered in `text`, excluding collapsed and budget-omitted rows.
     public var shownRows: [Row] = []
     public var shownRefs: [String] { shownRows.compactMap(\.ref) }
 
@@ -175,10 +175,16 @@ public enum Snapshotter {
         let focused = appElement.element(kAXFocusedUIElementAttribute)
         let focusRef = focused.flatMap { f in rows.first { $0.element == f }?.ref }
 
-        let (body, omitted) = Snapshot.render(rows, frames: req.frames, maxTokens: req.maxTokens)
-        let shownRows = Array(rows.prefix(rows.count - omitted))
+        let rendered: Snapshot.Rendering
+        if req.query?.isEmpty == false {
+            let (text, omitted) = Snapshot.render(rows, frames: req.frames, maxTokens: req.maxTokens)
+            rendered = Snapshot.Rendering(text: text, omitted: omitted, shownRows: Array(rows.prefix(rows.count - omitted)))
+        } else {
+            rendered = Snapshot.renderOverview(rows, frames: req.frames, maxTokens: req.maxTokens, focusRef: focusRef)
+        }
+        let body = rendered.text, omitted = rendered.omitted, shownRows = rendered.shownRows
         if req.markShown { await refs.markShown(shownRows) }
-        var notes = walkNotes(stats, omitted: omitted)
+        var notes: [String] = []
         let interactive = rows.filter { $0.kind == .interactive }.count
         // With no Finder windows open, Finder's "window" is the desktop: full-screen, untitled, nearly empty.
         let finderDesktop = app.bundleID == "com.apple.finder" && (windowTitle ?? "").isEmpty
@@ -198,6 +204,7 @@ public enum Snapshotter {
                 + "\(r.width.safeInt),\(r.height.safeInt)\" ocr=true reads it")
         }
 
+        notes += walkNotes(stats, omitted: omitted)
         var header = ["app: \(app.label)"]
         if let t = windowTitle, req.scope == .window || req.scope == .dialog { header.append("window \(quoted(t))") }
         header.append("focus: \(focusRef ?? (focused == nil ? "none" : "(not listed)"))")
@@ -215,14 +222,14 @@ public enum Snapshotter {
     /// elements, a page still loading, a cut, and the nodes, labels or values that failed to read.
     static func walkNotes(_ stats: WalkStats, omitted: Int) -> [String] {
         var notes: [String] = []
-        if omitted > 0 { notes.append("\(omitted) more rows not shown: narrow with query=, scope=, or raise max_tokens") }
-        if stats.offscreenSkipped > 0 { notes.append("\(stats.offscreenSkipped) offscreen elements skipped: scroll to reveal") }
+        if stats.offscreenSkipped > 0 { notes.append("\(stats.offscreenSkipped) offscreen elements skipped: scroll to reveal or use offscreen=true") }
         if stats.loadingPages > 0 { notes.append("a web page is still loading: its content may be incomplete; wait and snapshot again") }
         if stats.truncated { notes.append("walk stopped early (very large UI): narrow with scope= or query=") }
         if stats.readFailures > 0 { notes.append("\(stats.readFailures) elements could not be read: accessibility is incomplete; the app may be busy") }
         if stats.textReadFailures > 0 {
             notes.append("the labels or values of \(stats.textReadFailures) elements could not be read: some text may be missing")
         }
+        if omitted > 0 { notes.append("\(omitted) more rows not shown: narrow with query=, scope=, or raise max_tokens") }
         return notes
     }
 
