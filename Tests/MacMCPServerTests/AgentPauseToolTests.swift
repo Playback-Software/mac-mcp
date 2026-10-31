@@ -160,3 +160,18 @@ import Testing
 private extension JSONDecoder {
     func withISO8601() -> JSONDecoder { dateDecodingStrategy = .iso8601; return self }
 }
+
+@Suite struct MenuPathArgumentTests {
+    /// Some clients send the array form of a menu path as a JSON string; it's read as the array, not as one item.
+    @Test func aJSONArrayStringIsReadAsThePath() async throws {
+        let directory = NSTemporaryDirectory() + "menu-path-\(UUID())"
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let server = MacMCPServer.definition(audit: AuditLog(path: directory + "/audit"), tools: MacMCPServer.tools,
+                                             pause: AgentPause(paused: false))
+        let context = RequestContext(client: "test", protocolVersion: nil, leaseToken: nil, origin: "unit test",
+                                     id: UUID().uuidString, leasePath: directory + "/lease")
+        let result = await server.call("mac_menu", ["path": .string(#"["Apple", "Lock Screen"]"#)], context)
+        let text = result.content.compactMap { if case let .text(t) = $0 { t } else { nil } }.joined()
+        #expect(result.isError && text == SessionSafety.refusal(menuPath: ["Apple", "Lock Screen"]), "\(text)")
+    }
+}

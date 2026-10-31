@@ -7,6 +7,14 @@ MacMCP is in early development, so tools and policy keys may change before 1.0.
 
 ### Added
 
+- A kill switch for the person at the Mac: ⌃⇧⌘\ (or the menu bar item's "Stop and pause agents", or `mac-mcp pause`)
+  stops the running action and pauses agents. Only `mac-mcp resume` in Terminal resumes. A menu bar item shows when
+  an agent is driving; `--hide-indicator` hides it. The pause state survives restarts.
+- `mac-mcp setup`: a guided first run that opens the right System Settings panes and waits for the grants.
+- `mac-mcp install --client` and `uninstall --client` for Claude Code, Claude Desktop, Codex, Cursor and VS Code. They
+  edit only MacMCP's entry, keep a backup in MacMCP's protected support folder, and refuse files they can't parse.
+- A Claude Code plugin with a driving-macos skill: `/plugin marketplace add Playback-Software/mac-mcp`.
+- `scripts/measure-actions.py` and `MAC_MCP_DEBUG_ACTIONS=1` for per-action walk counts and timings.
 - `CONTRIBUTING.md` and this changelog.
 - A `VERSION` file at the repo root. `scripts/build.sh` reads it, and a unit test fails if the CLI's version differs.
 - A GitHub Actions workflow that builds, runs the unit tests and runs `scripts/lint-blocking.sh` on a macOS 26
@@ -15,12 +23,31 @@ MacMCP is in early development, so tools and policy keys may change before 1.0.
 
 ### Changed
 
+- `mac_snapshot` output over its budget keeps controls ahead of text, keeps the focused and selected rows and the
+  window's bottom controls, collapses runs of similar list rows, and marks each gap.
+- Actions refuse a ref that was never shown (a guessed one); find it with `query=` or a new snapshot.
+- Tool descriptions and server instructions are about 27% shorter, and say to trust an action's diff rather than
+  snapshot again.
+- Actions reuse settle's final walk for the report: clicks and menu commands are about 16% faster.
+- Protected-path checks resolve the protected locations once per check, so a 5,000-file Finder selection is checked
+  in about 1 s instead of 13–26 s.
+- OCR hands frames to Vision directly and, within one `mac_wait`, skips frames that haven't changed.
+- VS Code's, VS Code Insiders' and Cursor's user folders are protected like other AI clients' settings.
 - `scripts/build.sh` and `scripts/setup-signing.sh` stop with a fix when full Xcode or Swift 6.1+ is missing, and
   `build.sh` ends with a hint when `~/.local/bin` isn't on `PATH`.
 - `swift test` prints a notice when it skips the integration tests, pointing at `scripts/integration.sh`.
 - `scripts/soak.py` fails, rather than passing, when MacMCPTestHost isn't installed or never launched, and counts a
   skipped hang phase as a problem unless `--no-chaos` was passed.
 - `scripts/protocol-probe.py` has a shebang and is executable.
+
+### Fixed
+
+- `mac_script` refused every allowed app that had a window on macOS 27: its open-documents check required the window
+  server and Accessibility to list the same number of windows, and macOS 27 adds offscreen helper windows to every
+  app. The check now matches each window to its Accessibility element by window ID, and skips only the exact icon and
+  menu-bar backing windows, confirmed untitled through Screen Recording. Apps with other unexplained hidden windows
+  (Mail, for one) are still refused.
+- `mac_menu` accepts a path sent as a JSON array inside a string (`"[\"File\", \"Save As…\"]"`).
 
 ### Documentation
 
