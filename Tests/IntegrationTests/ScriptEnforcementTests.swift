@@ -68,7 +68,8 @@ extension Integration {
         let scripts = [
             ("Mail", "tell application \"Mail\"\nif (count of messages of inbox) > 0 then\nget read status of message 1 of inbox\nelse\nreturn true\nend if\nend tell"),
             ("TextEdit", "tell application \"TextEdit\" to get name of every document"),
-            ("Finder", "tell application \"Finder\" to get name of every file of desktop"),
+            // Finder's desktop container cannot be mapped to a file path, so file enumeration fails closed.
+            ("Finder", "tell application \"Finder\" to count of windows"),
         ]
         for (app, script) in scripts {
             try withPolicy(#"{"script":{"allowed_apps":["\#(app)"],"timeout_seconds":30}}"#) {

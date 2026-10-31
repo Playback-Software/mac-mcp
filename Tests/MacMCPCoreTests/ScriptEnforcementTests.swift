@@ -1,6 +1,7 @@
 import AppKit
 import Carbon
 import Foundation
+import OSAKit
 import Testing
 @testable import MacMCPCore
 
@@ -811,13 +812,79 @@ import Testing
             #expect(paths.forKeyword(AEKeyword(keyAEKeyData))?.typeCodeValue == code(property))
             let items = try #require(paths.forKeyword(AEKeyword(keyAEContainer)))
             #expect(items.forKeyword(AEKeyword(keyAEDesiredClass))?.typeCodeValue == code(tabs ? "bTab" : "docu"))
-            #expect(items.forKeyword(AEKeyword(keyAEKeyData))?.enumCodeValue == OSType(kAEAll))
+            let ordinal = try #require(items.forKeyword(AEKeyword(keyAEKeyData)))
+            #expect(ordinal.descriptorType == typeAbsoluteOrdinal)
+            #expect(ordinal.data == NSAppleEventDescriptor(enumCode: OSType(kAEAll)).data)
+            if tabs {
+                let windows = try #require(items.forKeyword(AEKeyword(keyAEContainer)))
+                let windowOrdinal = try #require(windows.forKeyword(AEKeyword(keyAEKeyData)))
+                #expect(windowOrdinal.descriptorType == typeAbsoluteOrdinal)
+                #expect(windowOrdinal.data == ordinal.data)
+            }
             #expect(ScriptHost.fileRefusal(query, target: target, dictionary: dictionary) == nil)
             let ordinary = event("coregetd")
             ordinary.setParam(try self.property("pnam", of: indexedObject("cwin")), forKeyword: AEKeyword(keyDirectObject))
             #expect(ScriptHost.documentRefusal(ordinary, target: target, dictionary: dictionary, inventory: .init(pid: 42, tabsPerWindow: [0])) { _ in
                 Issue.record("An ordinary window property queried document paths"); return nil
             } == nil)
+        }
+    }
+
+    @Test func textEditOffscreenUntitledDocumentUsesAppleScriptCollectionOrdinal() throws {
+        let editor = P.Target.application(bundleID: "com.apple.TextEdit", name: "TextEdit")
+        let dictionary = ScriptHost.Dictionary(target: editor)
+        #expect(dictionary.documentInventory(target: editor) == .init(property: "ppth", tabs: false))
+        let windows = try #require(documentWindows([
+            serverWindow(id: 718, onscreen: false, title: "Untitled"),
+            serverWindow(id: 717, bounds: CGRect(x: 0, y: 482, width: 500, height: 500), onscreen: false, title: ""),
+        ]))
+        #expect(windows.map(\.id) == [718])
+        let snapshot = ScriptDocuments.snapshot(bundleID: "com.apple.TextEdit", source: documentSource(
+            serverWindows: windows, windows: [718], frames: [718: documentFrame], reads: [
+                718: .init(values: [kAXRoleAttribute: kAXWindowRole, kAXSubroleAttribute: "AXDialog",
+                                    kAXTitleAttribute: "Untitled", kAXChildrenAttribute: [1]]),
+                1: .init(values: [kAXRoleAttribute: kAXScrollAreaRole, kAXChildrenAttribute: [2]]),
+                2: .init(values: [kAXRoleAttribute: kAXTextAreaRole]),
+            ]))
+        #expect(snapshot.check == .safe)
+        let inventory = try #require(snapshot.inventory)
+        #expect(inventory == .init(pid: 42, tabsPerWindow: [0]))
+        #expect(inventory.documentCount == 1)
+
+        // Build Apple's canonical reference locally. Veto every send, including terminology requests;
+        // neither compilation nor evaluation of this reference may contact TextEdit or any other app.
+        let language = try #require(OSALanguage(forName: "AppleScript"))
+        let instance = OSALanguageInstance(language: language)
+        let component = instance.componentInstance
+        let veto: OSASendUPP = { _, _, _, _, _, _, _, _ in OSErr(errAEEventNotPermitted) }
+        try #require(OSASetSendProc(component, veto, nil) == noErr)
+        var script: OSAID = 0, result: OSAID = 0
+        defer {
+            if result != 0 { OSADispose(component, result) }
+            if script != 0 { OSADispose(component, script) }
+            withExtendedLifetime(instance) {}
+        }
+        let source = NSAppleEventDescriptor(string: "return a reference to «property ppth» of every «class docu»")
+        try #require(OSACompile(component, source.aeDesc, 0, &script) == noErr)
+        try #require(OSAExecute(component, script, OSAID(kOSANullScript), 0, &result) == noErr)
+        var raw = AEDesc()
+        try #require(OSACoerceToDesc(component, result, typeObjectSpecifier, 0, &raw) == noErr)
+        let reference = NSAppleEventDescriptor(aeDescNoCopy: &raw)
+        let documents = try #require(reference.forKeyword(AEKeyword(keyAEContainer)))
+        let ordinal = try #require(documents.forKeyword(AEKeyword(keyAEKeyData)))
+        #expect(ordinal.descriptorType == typeAbsoluteOrdinal)
+        for key in ["pnam", "ppth"] {
+            let read = event("coregetd")
+            read.setParam(try property(key, of: documents), forKeyword: AEKeyword(keyDirectObject))
+            let refusal = ScriptHost.documentRefusal(read, target: editor, dictionary: dictionary, inventory: inventory) { plan in
+                let query = plan.event(address: NSAppleEventDescriptor(processIdentifier: inventory.pid))
+                let paths = query?.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))
+                let items = paths?.forKeyword(AEKeyword(keyAEContainer))
+                let actual = items?.forKeyword(AEKeyword(keyAEKeyData))
+                guard actual?.descriptorType == ordinal.descriptorType, actual?.data == ordinal.data else { return nil }
+                return inventoryReply([NSAppleEventDescriptor(typeCode: OSType(cMissingValue))])
+            }
+            #expect(refusal == nil, "\(key): \(refusal ?? "")")
         }
     }
 
