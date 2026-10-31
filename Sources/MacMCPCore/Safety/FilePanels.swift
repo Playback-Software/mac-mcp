@@ -166,6 +166,36 @@ extension OpenRoutes {
     /// The out-of-process service that shows Open and Save panels for apps.
     public static let panelService = "com.apple.appkit.xpc.openAndSavePanelService"
 
+    /// The service draws a host's panel in its own windows. Ownership alone isn't enough: a fresh host attachment
+    /// and a point inside that panel (or an AX-linked popup menu) must agree. Call on a guard worker.
+    public static func filePanelOwnsPoint(owner: pid_t, host: pid_t, at point: CGPoint, hit: AXElement? = nil) -> Bool {
+        guard owner != host, ownerBundleID(owner) == panelService else { return false }
+        return filePanelOwnsPoint(ownerBundleID: panelService, prompt: WindowServer.isSystemPrompt(pid: owner),
+                                  point: point, panel: { activeNamingPanel(pid: host) },
+                                  verified: { FilePanelScan.verdict($0) == .panel }, frame: Actions.frameOf,
+                                  linkedMenu: { panel in
+            guard let hit else { return false }
+            let command = commandTarget(of: hit)
+            guard [kAXMenuItemRole, kAXMenuRole].contains(command.role ?? "") else { return false }
+            if Actions.isWithin(hit, panel) { return true }
+            // Remote menus can lose their parent link while remaining children of the panel's popup control.
+            var queue = [panel], next = 0
+            while next < queue.count, next < FilePanelScan.visitLimit {
+                let node = queue[next]
+                next += 1
+                if node == hit || node == command { return true }
+                queue += FilePanelScan.children(node) ?? []
+            }
+            return false
+        })
+    }
+
+    static func filePanelOwnsPoint<N>(ownerBundleID: String?, prompt: Bool, point: CGPoint, panel: () -> N?,
+                                     verified: (N) -> Bool, frame: (N) -> CGRect?, linkedMenu: (N) -> Bool) -> Bool {
+        guard ownerBundleID == panelService, !prompt, let panel = panel(), verified(panel) else { return false }
+        return frame(panel)?.contains(point) == true || linkedMenu(panel)
+    }
+
     private static let filePanels = FilePanelCache<AXElement>(isAlive: { $0.isAlive })
 
     /// Whether `container`, a sheet, popover, dialog or floating window, is an Open, Save or Go to Folder panel: it holds

@@ -151,6 +151,41 @@ import Testing
 
     // MARK: Cache
 
+    /// The AX sheet belongs to TextEdit (1); its pixels, including the format menu, belong to the panel service (2).
+    @Test func serviceWindowsReachOnlyAnAttachedVerifiedPanel() {
+        let sheet = Node("AXSheet", id: "save-panel", [Node("AXRow", remote: true)])
+        let bounds = CGRect(x: 100, y: 100, width: 500, height: 400)
+        var attached = true
+        func owns(_ owner: String?, prompt: Bool = false, at p: CGPoint = CGPoint(x: 200, y: 200), menu: Bool = false) -> Bool {
+            OpenRoutes.filePanelOwnsPoint(ownerBundleID: owner, prompt: prompt, point: p,
+                                          panel: { attached ? sheet : nil }, verified: { verdict($0) == .panel },
+                                          frame: { _ in bounds }, linkedMenu: { _ in menu })
+        }
+        func scroll(_ allowed: Bool, inside: Bool = true) -> Bool {
+            let reaches = Actions.pointerReaches(targetPID: 1, targetWindow: 1, owner: 2, hitPID: 2, hitWindow: 2,
+                                                 remoteOwner: true, panelOwner: allowed)
+            return Actions.wheelReaches(receiverMatches: reaches, insideArea: inside)
+        }
+        #expect(owns(OpenRoutes.panelService))   // coordinate click, drag and hover use this ownership check
+        #expect(scroll(owns(OpenRoutes.panelService)))
+        #expect(!scroll(owns(OpenRoutes.panelService), inside: false), "the ref's scroll-area guard still applies")
+        #expect(!owns("com.apple.TextEdit"))
+        #expect(!owns("com.apple.SecurityAgent", prompt: true))
+        #expect(!owns(OpenRoutes.panelService, prompt: true))
+        #expect(!scroll(owns("com.example.other")))
+        let outside = CGPoint(x: 650, y: 200)
+        #expect(!owns(OpenRoutes.panelService, at: outside))
+        #expect(owns(OpenRoutes.panelService, at: outside, menu: true), "a menu linked to the panel may overflow it")
+        attached = false
+        #expect(!owns(OpenRoutes.panelService))
+        #expect(!scroll(owns(OpenRoutes.panelService)))
+        #expect(!owns(OpenRoutes.panelService, at: outside, menu: true))
+        attached = true
+        sheet.probe.identifier = ""
+        sheet.children = nil
+        #expect(!owns(OpenRoutes.panelService), "unreadable is conservative evidence for commit checks, never a pointer exemption")
+    }
+
     @Test func aPanelVerdictLastsWhileThePanelDoesAndANotPanelVerdictOnlyBriefly() {
         let start = Date(timeIntervalSince1970: 1_000_000)
         nonisolated(unsafe) var alive: Set<String> = ["sheet", "other"]

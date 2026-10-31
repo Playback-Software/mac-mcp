@@ -15,6 +15,9 @@ import Testing
             #expect(element == expected.0)
             #expect(point == expected.1) // point=nil would select hit.pid rather than the window owner
         }
+        if case let .target(_, _, pid, _) = checks[1] {
+            #expect(pid == nil, "the source app isn't the host of a cross-app drop's panel")
+        }
     }
 
     /// ⇧ or ⌘ on the button going down over an unselected Finder item extends or changes the selection, and the drag

@@ -82,7 +82,15 @@ enum RouteGuards {
             if let r = AgentSafety.refusal(pid: hit.pid) { return r }
             let hitPID = point.flatMap { WindowServer.owner(at: $0) } ?? hit.pid
             if let r = AgentSafety.refusal(pid: hitPID) { return r }
-            let remote = NSRunningApplication(processIdentifier: hitPID)?.bundleIdentifier == OpenRoutes.panelService
+            let service = NSRunningApplication(processIdentifier: hitPID)?.bundleIdentifier == OpenRoutes.panelService
+            let remote = service && pid.map { host in
+                if let point { return OpenRoutes.filePanelOwnsPoint(owner: hitPID, host: host, at: point, hit: hit) }
+                guard let panel = OpenRoutes.activeNamingPanel(pid: host) else { return false }
+                return OpenRoutes.namingPanel(of: hit) == panel
+            } == true
+            if service, let pid, pid != hitPID, !remote {
+                return "Refused: the point isn't in a verified file panel attached to the target app. Take mac_snapshot and retry."
+            }
             let owner = remote ? pid ?? hitPID : hitPID
             if WindowServer.isSystemPrompt(pid: owner) { return "Refused: a person must answer this macOS prompt." }
             if let running = NSRunningApplication(processIdentifier: owner),
@@ -196,7 +204,8 @@ enum RouteGuards {
     }
 
     static func dragTargets(source: AXElement, destination: AXElement, from: CGPoint, to: CGPoint, pid: pid_t?) -> [ActionRoute.Step] {
-        [.target(source, point: from, pid: pid, opens: false), .target(destination, point: to, pid: pid, opens: false)]
+        // A cross-app drop belongs to its own owner, never to the source app's remote-panel host.
+        [.target(source, point: from, pid: pid, opens: false), .target(destination, point: to, pid: nil, opens: false)]
     }
 
     static func checksDropFolder(owner: String?, panel: Bool) -> Bool {
