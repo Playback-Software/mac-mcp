@@ -6,14 +6,13 @@ enum ActionTools {
     static let click = ToolSpec(
         name: "mac_click",
         description: """
-            Click an element by ref (preferred) or at x,y. Buttons, checkboxes, links and menu items are pressed through \
-            accessibility; other targets get a real mouse click, but only after checking nothing else covers them. \
-            Returns what changed (diff) or, if a sheet/dialog appeared or the window changed, the new UI.
+            Click by ref or x,y. Buttons, checkboxes, links and menu items are pressed through accessibility; other \
+            targets get a mouse click after checking nothing covers them. Returns the diff.
             """,
         properties: targetProperties.merging([
-            "button": Prop.string("left (default), right or middle.", enum: Input.Button.allCases.map(\.rawValue)),
-            "count": Prop.integer("2 for double-click. Default 1."),
-            "modifiers": Prop.string("Keys held during the click, e.g. \"cmd\" or \"cmd+shift\"."),
+            "button": Prop.string("Default left.", enum: Input.Button.allCases.map(\.rawValue)),
+            "count": Prop.integer("2 for a double-click. Default 1."),
+            "modifiers": Prop.string("Keys held, e.g. \"cmd+shift\"."),
         ]) { $1 },
         annotations: .action,
         deadline: { _ in lockedDeadline(actionDeadline) }
@@ -34,17 +33,17 @@ enum ActionTools {
     static let type = ToolSpec(
         name: "mac_type",
         description: """
-            Type text. With ref: focuses that field, confirms the focus landed, types, and reads the value back to \
-            verify (mode=replace, the default, replaces the field's contents; append adds to it). Without ref: types \
-            at the current caret and selection. Explicit append places the caret through accessibility or refuses. \
-            submit=true verifies before Return. Newlines in text press Return.
+            Type text. With ref: focuses the field, types and reads the value back; mode=replace (default) replaces \
+            its contents, append adds at the end. Without ref or mode: inserts at the caret, replacing only the \
+            selection. If append can't place the caret through accessibility it refuses: click where to type and \
+            retry without mode. Newlines press Return.
             """,
         properties: [
-            "text": Prop.string("The text to type."),
-            "ref": Prop.string("The field to type into (from mac_snapshot). Default: the focused element."),
-            "mode": Prop.string("replace (default with ref) or append (places the caret at the end through accessibility). Without ref or mode, inserts at the current caret.", enum: ["replace", "append"]),
-            "submit": Prop.boolean("Press Return after typing."),
-            "app": Prop.string("App to type into when no ref is given. Default: the frontmost app."),
+            "text": Prop.string(),
+            "ref": Prop.string("Default: the focused element."),
+            "mode": Prop.string(enum: ["replace", "append"]),
+            "submit": Prop.boolean("Press Return after; not if a readable field's value doesn't match."),
+            "app": Prop.string("Without ref."),
         ],
         required: ["text"],
         annotations: .action,
@@ -66,19 +65,17 @@ enum ActionTools {
     static let key = ToolSpec(
         name: "mac_key",
         description: """
-            Press keys or shortcuts in the frontmost app (or app=, brought to the front first). Examples: "cmd+s", \
-            "esc", "return", "shift+tab", "cmd+a, delete" (a sequence), "down down", "cmd+," (a comma right \
-            after + is the comma key; also "cmd+comma"). keys may also be a list: ["cmd+,", "return"]. Prefer mac_menu \
-            for menu commands (it doesn't depend on the right window having focus). In Finder, a file panel or an \
-            open menu, send a key that acts on the selection (Return, Space, Tab, Delete, cmd+…) in its own call, \
-            with mac_snapshot between calls; after a key that may open a panel or menu (cmd+s, cmd+o, Return), \
-            send Return or Space in another call.
+            Press keys in the frontmost app (or app=, brought to the front): "cmd+s", "shift+tab", "cmd+a, delete" \
+            (a sequence), "down down", "cmd+," (the comma key), or a list ["cmd+,", "return"]. Prefer mac_menu for \
+            menu commands. In Finder, a file panel or an open menu, a key that acts on the selection (Return, Space, \
+            Tab, Delete, cmd+…) must come first in its call: send it separately, after mac_snapshot. After a key \
+            that may open a panel or menu (cmd+s, cmd+o, Return), send Return or Space in another call.
             """,
         properties: [
-            "keys": Prop.string("Key spec, comma/space-separated sequence, or a list of key specs. Punctuation names: "
-                + "comma, period, slash, semicolon, quote, bracketleft, bracketright, minus, equal, backslash, grave."),
-            "repeat": Prop.integer("Press the whole sequence this many times (max 50). Default 1."),
-            "app": Prop.string("Bring this app to the front first."),
+            "keys": Prop.string("Punctuation key names: comma, period, slash, semicolon, quote, bracketleft, "
+                + "bracketright, minus, equal, backslash, grave."),
+            "repeat": Prop.integer("Times to press the whole sequence (max 50)."),
+            "app": Prop.string(),
         ],
         required: ["keys"],
         annotations: .action,
@@ -105,13 +102,12 @@ enum ActionTools {
     static let menu = ToolSpec(
         name: "mac_menu",
         description: """
-            Choose a menu-bar command by path, e.g. path="Format > Make Plain Text" or ["File", "Save As…"]. Works \
-            through accessibility, without opening menus or clicking; reports the available items when a step \
-            doesn't match, and disabled items. The most reliable way to run app commands.
+            Run a menu-bar command by path through accessibility, without opening menus: the most reliable way to run \
+            app commands. Reports the available items when a step doesn't match, and disabled items.
             """,
         properties: [
-            "app": Prop.string("App name or bundle ID. Default: the frontmost app."),
-            "path": Prop.string("Menu path (or a list of steps): \"File > Save As…\" (\" > \" separated). Matching ignores case and ellipses."),
+            "app": Prop.string(),
+            "path": Prop.string("\"Format > Make Plain Text\" or [\"File\", \"Save As…\"]; ignores case and ellipses."),
         ],
         required: ["path"],
         annotations: .action,
@@ -138,18 +134,16 @@ enum ActionTools {
     static let scroll = ToolSpec(
         name: "mac_scroll",
         description: """
-            Scroll. to_ref scrolls until that element is visible (use refs from a snapshot with offscreen=true). \
-            Otherwise scrolls the element at ref / x,y (default: the focused window's center) by amount in direction: \
-            lines like a mouse wheel, or unit=pixel for continuous trackpad-style deltas. modifiers holds keys during \
-            the scroll (cmd or ctrl for zoom in many apps, shift, alt). Returns newly visible elements.
+            Scroll ref or x,y (default: the window's center) by amount in direction, or until to_ref is visible \
+            (refs from mac_snapshot offscreen=true). Returns newly visible elements.
             """,
         properties: targetProperties.merging([
-            "direction": Prop.string("down (default), up, left or right.", enum: Actions.Direction.allCases.map(\.rawValue)),
-            "amount": Prop.integer("Lines to scroll, default 5 (a page is roughly 10–15); with unit=pixel, pixels (default 100)."),
-            "unit": Prop.string("line (default, mouse wheel notches) or pixel (continuous, like a trackpad).",
+            "direction": Prop.string("Default down.", enum: Actions.Direction.allCases.map(\.rawValue)),
+            "amount": Prop.integer("Default 5 lines (a page is about 10–15), or 100 pixels."),
+            "unit": Prop.string("Default line (wheel notches); pixel is continuous, like a trackpad.",
                                 enum: Input.ScrollUnit.allCases.map(\.rawValue)),
-            "modifiers": Prop.string("Keys held during the scroll, e.g. \"cmd\" or \"ctrl\"."),
-            "to_ref": Prop.string("Scroll until this element is in view."),
+            "modifiers": Prop.string("Keys held; cmd or ctrl zoom in many apps."),
+            "to_ref": Prop.string(),
         ]) { $1 },
         annotations: .action,
         deadline: { _ in lockedDeadline(actionDeadline) }
@@ -172,21 +166,20 @@ enum ActionTools {
     static let drag = ToolSpec(
         name: "mac_drag",
         description: """
-            Drag from one element or point to another (from_ref/from_x,from_y → to_ref/to_x,to_y), or onto an app's \
-            Dock icon with to_dock_app (opens a dragged file with that app). The press is held hold_ms before moving \
-            and the pointer dwells dwell_ms over the target before release; raise them if a drag doesn't start (a \
-            selection rectangle appears instead) or the target doesn't accept the drop.
+            Drag from from_ref or from_x,from_y to to_ref or to_x,to_y, or onto an app's Dock icon (to_dock_app, to \
+            open a dragged file with it). If the drag doesn't start (a selection rectangle appears) or the drop isn't \
+            accepted, raise hold_ms or dwell_ms.
             """,
         properties: [
-            "from_ref": Prop.string("Drag source ref."), "from_x": Prop.integer("Source x."), "from_y": Prop.integer("Source y."),
-            "to_ref": Prop.string("Drop target ref."), "to_x": Prop.integer("Target x."), "to_y": Prop.integer("Target y."),
-            "to_dock_app": Prop.string("Drop on this app's Dock icon instead (bundle ID or Dock name)."),
-            "screenshot_id": Prop.string("Interpret x,y as pixels of this screenshot."),
-            "app": Prop.string("App, when using coordinates."),
-            "hold_ms": Prop.integer("Hold the press this long before moving. Default 150, max 3000."),
-            "steps": Prop.integer("Intermediate pointer positions along the way. Default 20, max 200."),
-            "dwell_ms": Prop.integer("Pause over the target before releasing. Default 150 (600 onto the Dock), max 5000."),
-            "modifiers": Prop.string("Keys held during the drag, e.g. \"alt\" (copy) or \"cmd\"."),
+            "from_ref": Prop.string(), "from_x": Prop.integer(), "from_y": Prop.integer(),
+            "to_ref": Prop.string(), "to_x": Prop.integer(), "to_y": Prop.integer(),
+            "to_dock_app": Prop.string("Bundle ID or Dock name."),
+            "screenshot_id": Prop.string(),
+            "app": Prop.string("With coordinates."),
+            "hold_ms": Prop.integer("Press held before moving. Default 150, max 3000."),
+            "steps": Prop.integer("Pointer moves. Default 20, max 200."),
+            "dwell_ms": Prop.integer("Pause before release. Default 150 (Dock: 600), max 5000."),
+            "modifiers": Prop.string("Keys held, e.g. \"alt\" (copy)."),
         ],
         annotations: .action,
         deadline: { _ in lockedDeadline(actionDeadline) }
@@ -225,12 +218,11 @@ enum ActionTools {
     static let hover = ToolSpec(
         name: "mac_hover",
         description: """
-            Move the pointer onto an element by ref or to x,y without clicking, and leave it there, to reveal \
-            tooltips, hover menus and toolbars that appear on hover. Waits wait_ms (default 1500: tooltips take about \
-            a second), then reports the element's help text and any tooltip shown, plus what changed (diff).
+            Move the pointer onto ref or x,y without clicking, to reveal tooltips and hover UI. After wait_ms, \
+            reports the help text, any tooltip and the diff.
             """,
         properties: targetProperties.merging([
-            "wait_ms": Prop.integer("How long to wait on the target before reporting. Default 1500, max 5000."),
+            "wait_ms": Prop.integer("Default 1500, max 5000."),
         ]) { $1 },
         annotations: .action,
         deadline: { _ in lockedDeadline(actionDeadline) }

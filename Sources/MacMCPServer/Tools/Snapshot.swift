@@ -5,22 +5,20 @@ enum SnapshotTool {
     static let spec = ToolSpec(
         name: "mac_snapshot",
         description: """
-            See an app's UI as a compact list of elements. Interactive elements get refs (e12) that the action tools \
-            take; refs stay stable across snapshots while the element exists. Defaults to the frontmost app's focused \
-            window, or the sheet/dialog blocking it. The header names the app, window, focused element and any \
-            blockers (sheets, modal dialogs, macOS prompts, secure input). Offscreen content is skipped; scroll to \
-            reveal it. Use query= to find specific elements cheaply.
+            See an app's UI as rows; interactive elements get refs (e12) that stay the same while the element exists. \
+            Default: the focused window, or the sheet/dialog blocking it. The header lists blockers (sheets, dialogs, \
+            macOS prompts, secure input). Offscreen rows are skipped; scroll to reveal them.
             """,
         properties: [
-            "app": Prop.string("App name or bundle ID. Default: the frontmost app."),
-            "scope": Prop.string("window (default): focused window or the sheet/dialog blocking it. app: all windows "
-                + "and top-level menus. menubar: the menu bar. dialog: only the open sheet/dialog.",
+            "app": Prop.string(),
+            "scope": Prop.string("window (default): the focused window or the sheet/dialog blocking it. app: all "
+                + "windows and menus. dialog: only the sheet/dialog.",
                 enum: SnapshotScope.allCases.map(\.rawValue)),
-            "query": Prop.string("Only rows whose label or value contains this text (case-insensitive)."),
-            "max_tokens": Prop.integer("Output budget, default 1500. Rows beyond it are summarized."),
-            "frames": Prop.boolean("Include each element's frame (x,y w×h in screen points). Default false."),
-            "text": Prop.boolean("Include static text and headings. Default true."),
-            "offscreen": Prop.boolean("Also include elements scrolled out of view (more tokens). Default false."),
+            "query": Prop.string("Only rows whose label or value contains this (case-insensitive): the cheap way to find an element."),
+            "max_tokens": Prop.integer("Output budget. Default 1500."),
+            "frames": Prop.boolean("Include frames (x,y w×h in screen points)."),
+            "text": Prop.boolean("Include static text. Default true."),
+            "offscreen": Prop.boolean("Include elements scrolled out of view."),
         ],
         annotations: .readOnly
     ) { args, _ in

@@ -6,10 +6,8 @@ enum DoctorTool {
     static let spec = ToolSpec(
         name: "mac_doctor",
         description: """
-            Health check for this Mac's automation agent: macOS permissions (Accessibility, Screen Recording, \
-            Automation for each app mac_script may control), \
-            whether the screen is locked or nobody is logged in, display state, the agent's signing identity \
-            and version. Call it first when actions fail unexpectedly; each problem comes with how to fix it.
+            Health check: permissions (Accessibility, Screen Recording, Automation for each mac_script app), screen \
+            lock, login, display, signing identity and version, with a fix for each problem.
             """,
         annotations: .readOnly
     ) { _, context in

@@ -32,18 +32,16 @@ enum WindowTool {
     static let spec = ToolSpec(
         name: "mac_window",
         description: """
-            Manage windows. list: an app's windows (or every app's, if app is omitted) with index, title and frame. \
-            focus: raise a window and bring its app to the front. move / resize: set the position (x,y) or size \
-            (width,height) in screen points. minimize / restore. close: press the close button (the app may ask to \
-            save; check blockers with mac_snapshot). Pick a window with window= (1-based index or title text); \
-            default is the focused window.
+            list: windows with index, title and frame (every app's without app=). focus: raise a window and its app. \
+            move / resize: set x,y or width,height in screen points. minimize / restore. close: press its close \
+            button (the app may ask to save). window= is a 1-based index from list or part of a title; default: the \
+            focused window.
             """,
         properties: [
-            "action": Prop.string("What to do.", enum: actions),
-            "app": Prop.string("App name or bundle ID. Default: the frontmost app (list: all apps)."),
-            "window": Prop.string("1-based index from list, or part of the title."),
-            "x": Prop.integer("move: left edge in screen points."), "y": Prop.integer("move: top edge in screen points."),
-            "width": Prop.integer("resize: width in points."), "height": Prop.integer("resize: height in points."),
+            "action": Prop.string(enum: actions),
+            "app": Prop.string(),
+            "window": Prop.string(),
+            "x": Prop.integer(), "y": Prop.integer(), "width": Prop.integer(), "height": Prop.integer(),
         ],
         required: ["action"],
         annotations: .action,

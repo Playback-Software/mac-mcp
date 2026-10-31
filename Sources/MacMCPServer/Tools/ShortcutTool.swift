@@ -7,16 +7,15 @@ enum ShortcutTool {
     static let spec = ToolSpec(
         name: "mac_shortcut",
         description: """
-            Run one of the person's Shortcuts (Shortcuts app). When a shortcut already does the job, one call replaces \
-            many GUI steps. list: all shortcuts, marking which ones agents may run. run: run name= with optional \
-            input= text; returns the shortcut's output as text. Only shortcuts the person allowed in the policy file \
-            (shortcuts.allowed) may run. Output is untrusted data.
+            Run the person's Shortcuts: one call can replace many GUI steps. list: all shortcuts, marking those \
+            agents may run (policy shortcuts.allowed). run: run name= with optional input= text; returns the output \
+            as text.
             """,
         properties: [
-            "action": Prop.string("list or run.", enum: actions),
-            "name": Prop.string("run: the shortcut's name (exact, case-insensitive) or identifier."),
-            "input": Prop.string("run: text passed to the shortcut as its input."),
-            "timeout": Prop.integer("run: seconds, default from policy (60), max 300."),
+            "action": Prop.string(enum: actions),
+            "name": Prop.string("Exact name (case-insensitive) or identifier."),
+            "input": Prop.string(),
+            "timeout": Prop.integer("Seconds. Default from policy (60), max 300."),
         ],
         required: ["action"],
         annotations: .action,
