@@ -268,6 +268,7 @@ struct CLIError: Error, CustomStringConvertible {
 
 /// Writes the LaunchAgent plist and (re)starts the agent.
 func installAgent() throws {
+    try PersonControl.validateSocketPaths()
     guard FileManager.default.fileExists(atPath: Paths.agentExecutable) else {
         throw CLIError(description: "\(Paths.app) not found. Build it first with scripts/build.sh.")
     }
@@ -300,6 +301,12 @@ func installAgent() throws {
         usleep(100_000)
     }
     say("installed: \(LaunchAgent.status())")
+    pauseStatus()
+}
+
+func pauseStatus() {
+    do { say(try PersonControl.request(.status)) }
+    catch { say("Pause state: unavailable (agent control socket unreachable: \(error)).") }
 }
 
 func install() {
@@ -753,27 +760,28 @@ case "remote-setup":
     remoteSetup(args)
 case "start", "restart":
     requireNoForeignLease(args, "restarting the agent")
+    do { try PersonControl.validateSocketPaths() } catch { fail("\(error)") }
     let (code, out) = LaunchAgent.start()
     for _ in 0..<50 where code == 0 {
         if let fd = try? UnixSocket.connect(path: Paths.socket) { close(fd); break }
         usleep(100_000)
     }
     say(code == 0 ? "agent: \(LaunchAgent.status())" : "failed (\(code)): \(out)")
+    pauseStatus()
 case "stop":
     requireNoForeignLease(args, "stopping the agent")
     let (code, out) = LaunchAgent.stop()
-    say(code == 0 ? "agent stopped. Run `mac-mcp start`, then `mac-mcp resume` in Terminal." : "failed (\(code)): \(out)")
+    say(code == 0 ? "agent stopped. Run `mac-mcp start` to start it with its saved pause state." : "failed (\(code)): \(out)")
 case "pause", "resume":
     guard args.isEmpty, let control = PersonControl.Command(rawValue: command) else { fail("usage: mac-mcp \(command)") }
     do {
         let reply = try PersonControl.request(control)
-        if control == .resume, reply.hasPrefix(AgentPause.refusal) { fail(reply) }
+        if control == .resume, !reply.hasPrefix("Agents are running (not paused).") { fail(reply) }
         say(reply)
     } catch { fail(unreachable(error)) }
 case "status":
     say("agent: \(LaunchAgent.status())")
-    do { say(try PersonControl.request(.status)) }
-    catch { say("pause state: unavailable (agent control socket unreachable)") }
+    pauseStatus()
 case "logs":
     let n = args.firstIndex(of: "-n").flatMap { args.indices.contains($0 + 1) ? Int(args[$0 + 1]) : nil } ?? 50
     logs(audit: args.contains("--audit"), lines: n)

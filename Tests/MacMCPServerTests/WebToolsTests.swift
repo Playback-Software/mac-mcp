@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import MacMCPCore
+@testable import MacMCPCore
 @testable import MacMCPServer
 
 @Suite struct WebStepTests {
@@ -166,6 +166,40 @@ private final class FakeSafari: @unchecked Sendable {
     func seen(_ call: String) async -> Bool {
         await waitUntil("the fake to see \(call)") { callLog.contains(call) }
         return callLog.contains(call)
+    }
+}
+
+@Suite struct SafariPauseTests {
+    @Test func readOnlyCallsCannotStartOrRestartSafariWhilePaused() async throws {
+        let state = AgentPause(paused: true), safari = FakeSafari()
+        let bridge = SafariBridge(exchange: safari.exchange, pause: state)
+        for tool in ["list_tabs", "page_info", "get_page_content", "browser_dialogs", "browser_console_messages"] {
+            let error = await #expect(throws: ActionError.self) { try await bridge.call(tool) }
+            #expect(error?.description == AgentPause.refusal)
+        }
+        await #expect(throws: ActionError.self) { try await bridge.readMarkdown() }
+        #expect(safari.callLog.isEmpty)
+
+        #expect(state.resumeFromPerson(revision: state.status.revision))
+        _ = try await bridge.call("list_tabs")
+        state.pause()
+        // An already-running session can still answer reads; pausing normally stops it via PersonControl.
+        _ = try await bridge.call("list_tabs")
+        #expect(safari.callLog == ["list_tabs", "list_tabs"])
+        bridge.stop()
+        await #expect(throws: ActionError.self) { try await bridge.call("list_tabs") }
+        #expect(safari.callLog == ["list_tabs", "list_tabs"])
+    }
+
+    @Test func lostSafariCannotBeRelaunchedByAReadWhilePaused() async throws {
+        let state = AgentPause(), safari = FakeSafari()
+        let bridge = SafariBridge(exchange: safari.exchange, pause: state)
+        _ = try await bridge.call("list_tabs")
+        state.pause()
+        safari.lostSafariReplies = 1
+        await #expect(throws: ActionError.self) { try await bridge.call("list_tabs") }
+        #expect(safari.callLog == ["list_tabs", "lost:list_tabs"])
+        #expect(bridge.stopCount == 1)
     }
 }
 

@@ -4,6 +4,20 @@ import Testing
 @testable import MacMCPServer
 
 @Suite struct PolicyDoctorTests {
+    @Test func hotkeyFailureRemainsInDoctorAfterResume() {
+        let state = AgentPause()
+        state.setHotkeyStatus("UNAVAILABLE (already registered); restart to retry")
+        state.pause(reason: "Paused because the stop hotkey could not be registered")
+        let paused = DoctorTool.pauseLines(state.status).joined(separator: "\n")
+        #expect(paused.contains("pause hotkey: UNAVAILABLE"))
+        #expect(paused.contains("hotkey could not be registered"))
+        #expect(!paused.contains("by a person"))
+        #expect(state.resumeFromPerson(revision: state.status.revision))
+        let running = DoctorTool.pauseLines(state.status).joined(separator: "\n")
+        #expect(running.contains("Agents are running (not paused)."))
+        #expect(running.contains("pause hotkey: UNAVAILABLE"))
+    }
+
     private func status(_ source: PolicyStatus.Source, pending: [Loosening] = [], problems: [String] = [],
                         enforced: Result<Policy, Policy.LoadError> = .success(Policy())) -> PolicyStatus {
         PolicyStatus(enforced: enforced, source: source, pending: pending, problems: problems, fallback: Policy(),

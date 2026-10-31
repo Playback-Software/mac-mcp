@@ -36,14 +36,17 @@ public final class SafariBridge: @unchecked Sendable {
     /// How requests reach safarimcp: the child process, or a stand-in in tests (`init(exchange:)`).
     typealias Exchange = @Sendable (_ method: String, _ params: Value) async throws -> Value
     private let fake: Exchange?
+    private let pause: AgentPause
+    private var fakeStarted = false
     /// How long a request waits for earlier abandoned requests that touch the page to finish before it restarts the session.
     private let abandonedGrace: TimeInterval
 
-    public init() { fake = nil; abandonedGrace = Self.abandonedGrace }
+    public init(pause: AgentPause = .shared) { fake = nil; self.pause = pause; abandonedGrace = Self.abandonedGrace }
     /// A bridge whose requests go to `exchange` instead of a safarimcp process (tests).
-    init(exchange: @escaping Exchange, abandonedGrace: TimeInterval = SafariBridge.abandonedGrace) {
+    init(exchange: @escaping Exchange, abandonedGrace: TimeInterval = SafariBridge.abandonedGrace, pause: AgentPause = .shared) {
         fake = exchange
         self.abandonedGrace = abandonedGrace
+        self.pause = pause
     }
 
     public struct Reply: Sendable {
@@ -257,7 +260,16 @@ public final class SafariBridge: @unchecked Sendable {
     private func ensureStarted() async throws {
         try AgentPause.permit?.check()
         try Task.checkCancellation()
-        if fake != nil || lock.withLock({ process?.isRunning ?? false }) { return }
+        if lock.withLock({ fakeStarted || (process?.isRunning ?? false) }) { return }
+        // A read may reuse an existing session, but launching Safari changes the screen. Give startup its own
+        // revocable permit even when the caller is read-only, including retries after a session disappears.
+        try await pause.withAction(label: "Safari session startup") { try await self.startSession() }
+    }
+
+    private func startSession() async throws {
+        try AgentPause.permit?.check()
+        try Task.checkCancellation()
+        if fake != nil { lock.withLock { fakeStarted = true }; return }
         guard FileManager.default.isExecutableFile(atPath: Self.executable) else {
             throw BridgeError.unavailable("\(Self.executable) not found (needs Safari 27 or later)")
         }
@@ -272,13 +284,13 @@ public final class SafariBridge: @unchecked Sendable {
         let current = lock.withLock { () -> Int in session += 1; return session }
         p.terminationHandler = { [weak self] _ in self?.failAll(session: current) }
         try p.run()
-        do { try AgentPause.permit?.check(); try Task.checkCancellation() }
-        catch { p.terminate(); throw error }
         lock.withLock {
             process = p
             input = stdin.fileHandleForWriting
             sessionStarted = Date()
         }
+        do { try AgentPause.permit?.check(); try Task.checkCancellation() }
+        catch { stop(); throw error }
         let reader = Thread { [weak self] in self?.readLoop(stdout.fileHandleForReading.fileDescriptor, session: current) }
         reader.name = "mac-mcp.safari.reader"
         reader.start()
@@ -294,7 +306,7 @@ public final class SafariBridge: @unchecked Sendable {
     public func stop() {
         let p = lock.withLock { () -> Process? in
             defer {
-                process = nil; input = nil; sessionStarted = nil
+                process = nil; input = nil; sessionStarted = nil; fakeStarted = false
                 stopCount += 1
                 inFlight = inFlight.filter { $0.value.session != session }   // ending the session ends them
             }

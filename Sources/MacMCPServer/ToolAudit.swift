@@ -72,9 +72,10 @@ enum ToolAudit {
     }
 
     /// `refused` for the calls the policy and safety layers turned down (their messages start "Refused"), `error` for
-    /// the other failures.
+    /// the other failures. Revoked calls that already started are `stopped`, since effects may have run.
     static func outcome(_ output: ToolOutput) -> String {
         guard output.isError else { return "ok" }
+        for case let .text(text) in output.content where text == AgentPause.stopped { return "stopped" }
         for case let .text(text) in output.content where text.hasPrefix("Refused") { return "refused" }
         return "error"
     }

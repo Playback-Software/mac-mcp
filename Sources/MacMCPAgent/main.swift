@@ -20,6 +20,9 @@ if CommandLine.arguments.dropFirst().first == ScriptHost.argument {
 
 _ = Scripts.hostExecutable
 
+do { try PersonControl.validateSocketPaths() }
+catch { log("Cannot start MacMCP: \(error)"); exit(1) }
+
 let audit = AuditLog()
 
 let server = MacMCPServer.definition(audit: audit)
@@ -64,6 +67,7 @@ OCR.warmUp()   // a cold first load of Vision's recognizer takes about a minute;
 let application = NSApplication.shared
 application.setActivationPolicy(.accessory)
 let indicator = AgentIndicator(controls: controls, arguments: Array(CommandLine.arguments.dropFirst()))
+application.delegate = indicator
 
 controls.start {
     Thread {
