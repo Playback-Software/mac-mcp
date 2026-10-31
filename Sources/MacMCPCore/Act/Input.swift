@@ -33,6 +33,7 @@ public enum Input {
     struct Environment: @unchecked Sendable {
         var check: (pid_t?, Bool) throws -> Void
         var post: (CGEvent) -> Void
+        var postToPID: ((CGEvent, pid_t) -> Void)? = nil
         var windows: (@Sendable () -> [WindowInfo])? = nil
         var dragCleanup: (@Sendable (CGPoint, pid_t?) throws -> DragCleanupState)? = nil
     }
@@ -55,6 +56,7 @@ public enum Input {
 
     static func check(pid: pid_t?, keyboard: Bool = false, point: CGPoint? = nil,
                       validate: @escaping @Sendable () throws -> Void = {}, route: ActionRoute.Step? = nil) async throws {
+        if BackgroundMode.enabled, point != nil { throw ActionError(BackgroundMode.refusal("use pointer input")) }
         try AgentPause.permit?.check()
         if let refusal = AgentSafety.refusal(pid: pid) { throw ActionError(refusal) }
         try Task.checkCancellation()
@@ -94,19 +96,26 @@ public enum Input {
     static func pause(_ ms: Int) async throws { try await Task.sleep(for: .milliseconds(max(0, ms))) }
 
     /// Only cleanup bypasses the guard, and only for a down this sequence actually posted.
-    static func post(_ event: CGEvent?) {
+    static func post(_ event: CGEvent?, pid: pid_t? = nil) {
         guard let event else { return }
-        if let environment { environment.post(event) } else { event.post(tap: .cghidEventTap) }
+        if BackgroundMode.enabled {
+            // Includes paired key/modifier releases on cancellation. No event in this mode reaches the HID tap.
+            guard let pid, pid > 0, [.keyDown, .keyUp, .flagsChanged].contains(event.type) else { return }
+            if let environment { environment.postToPID?(event, pid) }
+            else { event.postToPid(pid) }
+        } else if let environment { environment.post(event) }
+        else { event.post(tap: .cghidEventTap) }
     }
 
-    static func setModifiers(_ flags: CGEventFlags) {
+    static func setModifiers(_ flags: CGEventFlags, pid: pid_t? = nil) {
         let e = CGEvent(source: source)
         e?.type = .flagsChanged
         e?.flags = flags
-        post(e)
+        post(e, pid: pid)
     }
 
     public static func move(to p: CGPoint, pid: pid_t? = nil) async throws {
+        try BackgroundMode.requireForeground("move the pointer")
         try await sequence {
             try await check(pid: pid, point: p)
             post(CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: p, mouseButton: .left))
@@ -115,6 +124,7 @@ public enum Input {
     }
 
     public static func click(at p: CGPoint, button: Button = .left, count: Int = 1, modifiers: CGEventFlags = [], pid: pid_t? = nil) async throws {
+        try BackgroundMode.requireForeground("click the pointer")
         try await sequence {
             let (down, up, cgButton): (CGEventType, CGEventType, CGMouseButton) = switch button {
             case .left: (.leftMouseDown, .leftMouseUp, .left)
@@ -146,6 +156,7 @@ public enum Input {
     }
 
     public static func hover(at p: CGPoint, pid: pid_t? = nil) async throws {
+        try BackgroundMode.requireForeground("hover the pointer")
         try await sequence {
             try await move(to: CGPoint(x: p.x - 2, y: p.y), pid: pid)
             try await move(to: p, pid: pid)
@@ -162,6 +173,7 @@ public enum Input {
 
     public static func drag(from a: CGPoint, to b: CGPoint, timing: DragTiming = DragTiming(), pid: pid_t? = nil,
                             validate: @escaping @Sendable () throws -> Void = {}) async throws {
+        try BackgroundMode.requireForeground("drag the pointer")
         try await sequence {
             guard let mouse = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: a, mouseButton: .left) else {
                 throw ActionError("Could not create mouse input. Check mac_doctor and retry.")
@@ -229,6 +241,7 @@ public enum Input {
 
     public static func scroll(at p: CGPoint, dx: Int = 0, dy: Int, unit: ScrollUnit = .line, modifiers: CGEventFlags = [],
                               pid: pid_t? = nil, validate: @escaping @Sendable () throws -> Void = {}) async throws {
+        try BackgroundMode.requireForeground("scroll with the pointer")
         try await sequence {
             try await move(to: p, pid: pid)
             try await check(pid: pid, point: p, validate: validate)
@@ -265,9 +278,9 @@ public enum Input {
                     guard let e = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) else { continue }
                     e.flags = []
                     chunk.withUnsafeBufferPointer { e.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: $0.baseAddress) }
-                    post(e)
+                    post(e, pid: pid)
                     e.type = .keyUp
-                    post(e)
+                    post(e, pid: pid)
                     try await pause(8)
                 }
                 buffer = ""
@@ -302,18 +315,19 @@ public enum Input {
     }
 
     public static func press(_ spec: KeySpec, repeat count: Int = 1, pid: pid_t? = nil) async throws {
+        if BackgroundMode.enabled, let refusal = BackgroundMode.keyRefusal(spec) { throw ActionError(refusal) }
         try await sequence {
             for _ in 0..<max(1, count) {
                 try await check(pid: pid, keyboard: true, route: .key(spec, pid: pid))
                 guard let e = CGEvent(keyboardEventSource: source, virtualKey: spec.key, keyDown: true) else { continue }
                 e.flags = spec.flags
-                post(e)
+                post(e, pid: pid)
                 do {
                     defer {
                         e.type = .keyUp
                         e.flags = []
-                        post(e)
-                        if !spec.flags.isEmpty { setModifiers([]) }
+                        post(e, pid: pid)
+                        if !spec.flags.isEmpty { setModifiers([], pid: pid) }
                     }
                     try await pause(25)
                 }

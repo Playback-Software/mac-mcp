@@ -66,9 +66,9 @@ enum AppTool {
                 }
                 do {
                     let app = try await AppControl.launch(query, open: open)
-                    let front = await AppControl.activate(app)
+                    let front = BackgroundMode.enabled ? false : await AppControl.activate(app)
                     let windows = WindowControl.windows(of: app).map(\.line)
-                    return .text("\(app.label) is running\(front ? " and frontmost" : " (could not bring it to the front)").\n"
+                    return .text("\(app.label) is running\(BackgroundMode.enabled ? " in background mode" : front ? " and frontmost" : " (could not bring it to the front)").\n"
                         + (windows.isEmpty ? "No windows yet." : "Windows:\n" + Untrusted.wrap(lines: windows))
                         + "\nNext: mac_snapshot app=\"\(app.name)\" to see its UI.", auditDetail: app.label)
                 } catch {

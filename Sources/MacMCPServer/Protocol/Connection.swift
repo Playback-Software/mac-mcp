@@ -8,7 +8,19 @@ public struct RequestContext: Sendable {
     public let leaseToken: String?
     public let origin: String?
     public let id: String
+    public let background: Bool
     let leasePath: String
+
+    init(client: String, protocolVersion: String?, leaseToken: String?, origin: String?, id: String,
+         background: Bool = false, leasePath: String) {
+        self.client = client
+        self.protocolVersion = protocolVersion
+        self.leaseToken = leaseToken
+        self.origin = origin
+        self.id = id
+        self.background = background
+        self.leasePath = leasePath
+    }
 
     public var leaseHolder: String? {
         get async {
@@ -59,6 +71,8 @@ public actor Session {
             return lease.holder
         }
     }
+    /// Person-owned relay opt-in. Once enabled in the preamble, no MCP message can clear it.
+    public private(set) var background = false
     /// `local` or `ssh:<address>`, as the relay reported it; nil for clients that connect without the relay.
     public private(set) var origin: String?
     /// The relay's session id (stable across agent restarts), else one for this connection.
@@ -73,7 +87,7 @@ public actor Session {
     /// Snapshot before dispatch. Modern requests never inherit the identity of an earlier request.
     func snapshot(version: String?, info: Value?) -> RequestContext {
         RequestContext(client: version == nil ? legacyClient : Self.clientLabel(info), protocolVersion: version ?? legacyVersion,
-                leaseToken: leaseToken, origin: origin, id: id, leasePath: leasePath)
+                leaseToken: leaseToken, origin: origin, id: id, background: background, leasePath: leasePath)
     }
 
     private static func clientLabel(_ info: Value?) -> String {
@@ -104,6 +118,7 @@ public actor Session {
             let parts = field.split(separator: "=", maxSplits: 1).map(String.init)
             guard parts.count == 2 else { continue }
             switch parts[0] {
+            case "background": background = background || parts[1] == "true"
             case "lease":
                 leaseToken = parts[1]
             case "origin": origin = parts[1]
@@ -332,14 +347,14 @@ public final class Connection: @unchecked Sendable {
                 "protocolVersion": .string(version),
                 "capabilities": capabilities,
                 "serverInfo": serverInfo,
-                "instructions": .string(server.instructions),
+                "instructions": .string(server.instructions + (context.background ? "\n" + BackgroundMode.instructions : "")),
             ], id: id, reply: reply)
         case "server/discover":
             send(result: [
                 "supportedVersions": supportedVersions,
                 "capabilities": ["tools": [:]],
-                "instructions": .string(server.instructions),
-                "ttlMs": .int(Self.listTTL),
+                "instructions": .string(server.instructions + (context.background ? "\n" + BackgroundMode.instructions : "")),
+                "ttlMs": .int(context.background ? 0 : Self.listTTL),
                 "cacheScope": "public",
             ], id: id, modern: true, reply: reply)
         case "ping":   // legacy only (removed in 2026-07-28); harmless to answer either way

@@ -48,7 +48,7 @@ public enum Settle {
     /// Whether a window belongs in the app's signature: its own windows (menus, popovers and sheets are windows of
     /// the app too) and pop-up menus from anywhere. Other apps' windows don't: a notification banner or a menu-bar
     /// item redrawing elsewhere would otherwise reset the quiet timer.
-    static func counts(_ w: WindowInfo, pid: pid_t) -> Bool { w.pid == pid || w.layer == popUpMenuLevel }
+    static func counts(_ w: WindowInfo, pid: pid_t) -> Bool { w.pid == pid || !BackgroundMode.enabled && w.layer == popUpMenuLevel }
 
     static func combineWindows(_ windows: [WindowInfo], pid: pid_t, into h: inout Hasher) {
         for w in windows where counts(w, pid: pid) {
@@ -61,13 +61,15 @@ public enum Settle {
     /// One sample. `nodeBudget` bounds the tree walk; the stats say whether it stopped short of the budget (by time).
     static func signature(pid: pid_t, nodeBudget: Int, timeLimit: TimeInterval) -> (hash: Int, walk: WalkStats?, capture: Walker.Capture?) {
         var h = Hasher()
-        h.combine(NSWorkspace.shared.frontmostApplication?.processIdentifier)
+        if !BackgroundMode.enabled { h.combine(NSWorkspace.shared.frontmostApplication?.processIdentifier) }
         combineWindows(WindowServer.onScreenWindows(), pid: pid, into: &h)
         let app = AXElement.application(pid: pid, timeout: 0.5)
         if let focused = app.element(kAXFocusedUIElementAttribute) { h.combine(focused) }
         var walk: WalkStats?
         var capture: Walker.Capture?
-        if let window = app.element(kAXFocusedWindowAttribute) {
+        let window = app.element(kAXFocusedWindowAttribute) ?? (BackgroundMode.enabled
+            ? app.element(kAXMainWindowAttribute) ?? app.elements(kAXWindowsAttribute).first : nil)
+        if let window {
             var options = Walker.Options()
             options.maxNodes = nodeBudget
             options.timeLimit = timeLimit

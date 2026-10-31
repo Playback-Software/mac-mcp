@@ -95,7 +95,8 @@ enum ActionTools {
         let app = args.string("app")
         return await runAction(name: "key", app: app, target: nil) { _, pid in
             try await Actions.keys(specs, repeat: count, pid: pid)
-            return ActionSummary("pressed \(shown)" + (count > 1 ? " ×\(count)" : ""))
+            return ActionSummary("pressed \(shown)" + (count > 1 ? " ×\(count)" : "")
+                + (BackgroundMode.enabled ? "; sent to the app, delivery unverified; inspect the diff" : ""))
         }
     }
 
@@ -124,7 +125,7 @@ enum ActionTools {
         if let refused = await RouteGuards.menu(path, app: args.string("app")) { return refused }
         return await runAction(name: "menu", app: args.string("app"), target: nil) { _, pid in
             // Menu commands act on the app's key window; if the app isn't active, some (Electron) open a new window.
-            if NSRunningApplication(processIdentifier: pid).map({ !$0.isActive }) ?? false,
+            if !BackgroundMode.enabled, NSRunningApplication(processIdentifier: pid).map({ !$0.isActive }) ?? false,
                let running = NSRunningApplication(processIdentifier: pid) {
                 _ = await AppControl.activate(AppInfo(running))
             }

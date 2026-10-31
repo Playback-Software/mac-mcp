@@ -72,7 +72,7 @@ private func perform(
             return nil
         }
         // A point meant for app= that lands in another app's window: bring app= forward, then insist.
-        if app != nil, let r = resolved, r.point != nil, r.pid != 0, r.pid != pid, let target {
+        if !BackgroundMode.enabled, app != nil, let r = resolved, r.point != nil, r.pid != 0, r.pid != pid, let target {
             if let running = NSRunningApplication(processIdentifier: pid) { _ = await AppControl.activate(AppInfo(running)) }
             resolved = try await ActionMetrics.during(.resolve) { try await Actions.resolve(target, currentSnapshot: before.snapshot) }
             if let r = resolved, let point = r.point,
@@ -172,7 +172,7 @@ func actionReport(summary: String, settle: Settle.Result, before: SnapshotResult
 func report(summary: String, settle: Settle.Result, before: SnapshotResult, after: SnapshotResult) -> (text: String, shownRows: [Row]) {
     let head = summary + (settle.settled ? " · settled in \(settle.milliseconds) ms" : " · UI still changing after \(settle.milliseconds) ms")
     var lines: [String] = []
-    if let front = Apps.frontmost(), front.pid != after.app.pid {
+    if !BackgroundMode.enabled, let front = Apps.frontmost(), front.pid != after.app.pid {
         lines.append("note: the frontmost app is now \(front.label); snapshot it with app=\"\(front.name)\"")
     }
     // Structural change (window, sheet, dialog, prompt) → show the new state; notes like secure input don't count.

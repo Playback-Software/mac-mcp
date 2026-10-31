@@ -63,6 +63,7 @@ public enum MacMCPServer {
             let sessionID = session.id, origin = session.origin
             let metrics = ActionMetrics.enabled && name.hasPrefix("mac_") && spec.mutates(args) ? ActionMetrics.Recorder() : nil
             let execute: @Sendable () async -> ToolOutput = {
+                if session.background, let refusal = backgroundRefusal(tool: name, args: args) { return .error(refusal) }
                 let output: ToolOutput
                 do {
                     let admission: Claims.Admission?
@@ -83,7 +84,9 @@ public enum MacMCPServer {
                                     try await Deadline.run(deadline + 5) {
                                         if let admission { try await claims.recheck(admission) }
                                         return await Input.$leaseCheck.withValue(LeaseStore.InputCheck(token: session.leaseToken, path: session.leasePath)) {
-                                            await ActionMetrics.$current.withValue(metrics) { await spec.handler(args, context) }
+                                            await BackgroundMode.$enabled.withValue(session.background) {
+                                                await ActionMetrics.$current.withValue(metrics) { await spec.handler(args, context) }
+                                            }
                                         }
                                     }
                                 }
@@ -124,7 +127,7 @@ public enum MacMCPServer {
                 detail: ToolAudit.detail(tool: name, raw: args.raw, secretKeys: spec.secretArguments, output: output),
                 durationMs: Int(Date().timeIntervalSince(started) * 1000),
                 session: sessionID, origin: origin, lease: leaseHolder))
-            return CallResult(content: output.content, isError: output.isError)
+            return CallResult(content: (session.background ? [.text("Background mode: enabled.")] : []) + output.content, isError: output.isError)
         }
     }
 }
