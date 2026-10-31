@@ -107,7 +107,7 @@ enum ActionTools {
             """,
         properties: [
             "app": Prop.string(),
-            "path": Prop.string("\"Format > Make Plain Text\" or [\"File\", \"Save As…\"]; ignores case and ellipses."),
+            "path": Prop.string("Steps separated by \" > \", e.g. \"File > Save As…\"; ignores case and ellipses."),
         ],
         required: ["path"],
         annotations: .action,
