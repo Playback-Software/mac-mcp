@@ -18,6 +18,7 @@ import CoreGraphics
 import Foundation
 import MacMCPCore
 
+// Must equal the VERSION file at the repo root, which scripts/build.sh reads (a unit test checks).
 let cliVersion = "0.1.1"
 
 func fail(_ message: String) -> Never {

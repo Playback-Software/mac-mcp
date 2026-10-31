@@ -210,7 +210,7 @@ import Testing
 @Suite(.serialized) struct ScriptHostProcessTests {
     @Test func propertyInitializersCanUseLocalSafeAdditions() async throws {
         let source = "property today : current date\nreturn class of today is date"
-        let result = try await Scripts.run(source, language: .applescript, timeout: 5)
+        let result = try await Scripts.run(source, language: .applescript, timeout: 30)   // cold hosts start slowly on CI
         #expect(result.status == 0 && result.stdout == "true", "\(result.stderr)")
         #if DEBUG
         // This OS may implement `current date` internally. Exercise a compile-time send explicitly too.

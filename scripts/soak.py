@@ -37,6 +37,7 @@ SOCKET = Path(os.environ.get("MAC_MCP_SOCKET", HOME / "Library/Application Suppo
 AGENT_LOG = HOME / "Library/Logs/MacMCP/agent.log"
 HOST = "MacMCPTestHost"
 HOST_ID = "com.playbacksoftware.macmcp.testhost"
+HOST_APP = HOME / "Applications/MacMCPTestHost.app"
 MODERN = True  # set from --legacy in main()
 SLACK = 10  # seconds beyond a tool's deadline before a call counts as hung
 
@@ -157,6 +158,15 @@ def host_pid() -> int | None:
     return int(out[0]) if out else None
 
 
+def wait_for_host(seconds: float) -> int | None:
+    deadline = time.monotonic() + seconds
+    while True:
+        pid = host_pid()
+        if pid or time.monotonic() >= deadline:
+            return pid
+        time.sleep(0.5)
+
+
 def agent_pid() -> int | None:
     out = subprocess.run([str(CLI), "status"], capture_output=True, text=True).stdout
     m = re.search(r"pid (\d+)", out)
@@ -250,6 +260,10 @@ def main() -> int:
     global MODERN
     MODERN = not args.legacy
 
+    if not HOST_APP.exists():
+        print(f"FAIL: {HOST_APP} is not installed, so there is nothing to soak. Run scripts/build-testhost.sh first.",
+              file=sys.stderr)
+        return 1
     lease = subprocess.run([str(CLI), "lease", "acquire", "--holder", "soak", "--reason", "scripts/soak.py",
                             "--minutes", "90", "--pid", str(os.getpid())], capture_output=True, text=True)
     if lease.returncode != 0:
@@ -269,6 +283,10 @@ def main() -> int:
         # Let TestHost settle first: right after the integration tests it can still be recovering (focus, a frozen
         # spell), and the first typing then lands nowhere.
         time.sleep(2)
+        if not wait_for_host(10):
+            print(f"FAIL: {HOST} never launched, so the run would test nothing. Run scripts/build-testhost.sh to "
+                  f"reinstall it, then check that `mac-mcp call mac_app` can launch {HOST_ID}.", file=sys.stderr)
+            return 1
         subprocess.run([str(CLI), "call", "mac_wait", json.dumps({"app": HOST, "until": "settled", "timeout": 10})],
                        env=env, capture_output=True)
         stop, phase, budget = threading.Event(), ["load"], [args.calls]
@@ -276,6 +294,7 @@ def main() -> int:
                    for i in range(args.workers)]
         for t in threads:
             t.start()
+        hang_ran = False
         if not args.no_chaos:
             while budget[0] > args.calls // 2 and any(t.is_alive() for t in threads):
                 time.sleep(1)
@@ -283,11 +302,15 @@ def main() -> int:
             if pid:
                 print(f"[hang] SIGSTOP TestHost ({pid}) for 20 s", flush=True)
                 phase[0] = "hang"
-                os.kill(pid, signal.SIGSTOP)
                 try:
+                    os.kill(pid, signal.SIGSTOP)
+                    hang_ran = True
                     time.sleep(20)
                 finally:
-                    os.kill(pid, signal.SIGCONT)
+                    try:
+                        os.kill(pid, signal.SIGCONT)
+                    except ProcessLookupError:
+                        pass
                 phase[0] = "load"
         last = time.monotonic()
         while any(t.is_alive() for t in threads):
@@ -314,6 +337,8 @@ def main() -> int:
         for k, v in stats.errors.most_common(15):
             print(f"  {v:4d}  {k}")
     problems = stats.hangs + stats.broken + watchdog + (["agent restarted unexpectedly"] if restarted else [])
+    if not args.no_chaos and not hang_ran:
+        problems.append(f"hang phase skipped: {HOST} was not running when it was due (pass --no-chaos to skip it on purpose)")
     hang_phase_ok = sum(v for k, v in stats.ok.items() if k.startswith("hang:"))
     print(f"hang phase: {hang_phase_ok} calls still succeeded (other apps, cached reads)")
     if problems:
@@ -321,7 +346,8 @@ def main() -> int:
         for p in problems[:30]:
             print("  " + p)
         return 1
-    print("\nPASS: no hangs, no corrupted responses, no unexpected agent restarts")
+    print("\nPASS: no hangs, no corrupted responses, no unexpected agent restarts" +
+          (" (chaos phases skipped: --no-chaos)" if args.no_chaos else ""))
     return 0
 
 

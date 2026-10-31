@@ -32,9 +32,11 @@ apply at once; edits that loosen it wait until you approve them with `mac-mcp po
 | `web.deny_hosts` · `web.allow_hosts` | Hosts (and their subdomains) the web tools may not, or may only, open, read or act on. Only http(s) URLs are ever opened. |
 | `web.allow_private_hosts` | Whether the web tools may open this Mac and private-network addresses: `localhost`, `127.x`, `10.x`, `172.16–31.x`, `192.168.x`, link-local (including cloud metadata at `169.254.169.254`), `*.local`. Off by default; a host listed in `allow_hosts` is allowed either way. Names that merely resolve to such an address aren't caught. |
 | `shortcuts.allowed` | Shortcuts (name, case-insensitive, or identifier) that `mac_shortcut` may run. Empty by default. A shortcut can do anything its actions can (shell scripts, files, messages), so allow only ones you'd be happy for an agent to run unattended. `mac_shortcut list` shows them all either way. |
+| `shortcuts.timeout_seconds` | How long `mac_shortcut` lets a shortcut run before stopping it (default 60 seconds; a call's own `timeout` replaces it, and 300 is the maximum either way). |
 | `clipboard_read` | Whether `mac_clipboard` may read the clipboard. With it off, pasting (⌘V, Edit ▸ Paste) is refused too unless the clipboard holds text MacMCP put there, since pasting into a document and reading it back would read the clipboard. Whatever the setting, a clipboard that a password manager marked as secret (`org.nspasteboard.ConcealedType` or `TransientType`, as 1Password and Apple Passwords do), or that came from a denied app (`org.nspasteboard.source`), is never read or pasted. |
 | `rate_limit_per_second` | Actions are spaced out to at most this rate. |
 | `alert_webhook` | POSTs a plain-text alert (ntfy-compatible) when work is blocked on a person: screen locked, a macOS prompt, a missing permission, an invalid policy, policy changes waiting for approval. |
+| `alert_cooldown_minutes` | Minimum minutes between two alerts of the same kind (session, prompt, permission, policy, agent). Default 10. |
 
 Policy files must be UTF-8 JSON objects with the expected setting types. Duplicate keys at any depth (including
 escaped spellings of the same key), malformed JSON and invalid types block agents; `mac-mcp doctor` says why. The
@@ -125,8 +127,9 @@ may be shown. It asks nothing to read an item's attributes or to add a new item.
   and it says how many. `mac-mcp policy prune` deletes them: it says how many records other builds made, and macOS
   then asks for your login keychain password once for each (enter it, or click Deny to keep that record). In normal
   use few stay: the agent's own (the first baseline, and tightenings) and those from before an upgrade.
-- The single item that MacMCP 0.1.0 kept (account `approved-policy`) is read like any other record, at sequence 0
-  if it has none. New records come after it, and `mac-mcp policy prune` deletes it.
+- MacMCP 0.1.0 approved nothing, so the first start after upgrading from it is a first run (see above).
+  Development builds from before 0.1.1 kept a single item (account `approved-policy`); it's read like any other
+  record, at sequence 0 if it has none. New records come after it, and `mac-mcp policy prune` deletes it.
 
 Each item's access list trusts MacMCP's own agent and CLI (matched by their code signature, so rebuilds signed with
 the same certificate qualify). Like the rest of the login keychain, the items don't stop software already running as

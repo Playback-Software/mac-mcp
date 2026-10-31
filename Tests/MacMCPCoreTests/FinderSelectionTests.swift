@@ -381,7 +381,8 @@ import Testing
         #expect(unknown.pasteFolders == unknown.folders)
         #expect(OpenRoutes.transferRefusal([config], into: unknown.pasteFolders) != nil)
         scratchColumn.selected = nil
-        #expect(OpenRoutes.frontView(windows: [w], focused: scratchColumn, tree: tree)?.pasteFolders.contains(docker) == true)
+        // Paths, not URLs: a folder that exists on this Mac (~/.docker) can come back with a trailing slash.
+        #expect(OpenRoutes.frontView(windows: [w], focused: scratchColumn, tree: tree)?.pasteFolders.map(\.path).contains(docker.path) == true)
         // Other views paste into the window's folder, as before.
         let rows = [listRow(scratch.appendingPathComponent("a.txt"))]
         let listView = list(kAXOutlineRole, rows, selecting: [], identifier: "ListView")
