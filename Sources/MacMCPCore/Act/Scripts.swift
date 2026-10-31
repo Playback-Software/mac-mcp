@@ -3,6 +3,10 @@ import ApplicationServices
 import Foundation
 import MachO
 
+// Accessibility has no public window-ID attribute. Never substitute a coincident frame when this lookup fails.
+@_silgen_name("_AXUIElementGetWindow")
+private func scriptAXWindowID(_ element: AXUIElement, _ id: UnsafeMutablePointer<CGWindowID>) -> AXError
+
 /// App automation with a source preflight and an Apple-event gate in a disposable signed host.
 public enum Scripts {
     public enum Language: String, Sendable, CaseIterable {
@@ -501,7 +505,10 @@ enum ScriptDocuments {
             applications: { Scripts.runningApplications(bundleID: $0) }, trusted: AXIsProcessTrusted,
             serverWindows: { pid in
                 guard let windows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] else { return nil }
-                return windowInventory(pid: pid, info: windows, displays: WindowServer.activeDisplays())
+                // Preflight can cache a denial: keep exemptions disabled in that case. A cached grant alone
+                // is insufficient; exemptions also require an empty CGWindowName in this fresh, live inventory.
+                return windowInventory(pid: pid, info: windows, displays: WindowServer.activeDisplays(),
+                                       screenRecording: CGPreflightScreenCaptureAccess())
             }, windows: { pid in
                 let read = AXElement.application(pid: pid, timeout: 0.2).attribute(reporting: kAXWindowsAttribute)
                 guard read.error == nil, let windows = read.value as? [AXUIElement] else { return nil }
@@ -510,19 +517,42 @@ enum ScriptDocuments {
                 AXUIElementSetMessagingTimeout(element.raw, 0.2)
                 return element.read(reporting: [kAXDocumentAttribute, kAXURLAttribute, kAXRoleAttribute, kAXPositionAttribute,
                                                 kAXSizeAttribute, kAXChildrenAttribute, kAXTabsAttribute])
+            }, windowID: { element in
+                var id = kCGNullWindowID
+                guard scriptAXWindowID(element.raw, &id) == .success, id != kCGNullWindowID else { return nil }
+                return id
             }, elements: { ($0 as? [AXUIElement])?.map(AXElement.init) }))
     }
 
     struct Window: Equatable {
         let id: CGWindowID
         let bounds: CGRect
+        let onscreen: Bool
+    }
+
+    /// Only the primary display's observed menu bar defines an exempt strip. Secondary-display bars have not
+    /// been classified. No guessed height or visible-frame fallback: unknown or conflicting geometry exempts none.
+    static func menuBarBounds(info: [[String: Any]], displays: [CGRect]) -> CGRect? {
+        guard let primary = displays.first(where: { $0.origin == .zero }) else { return nil }
+        let bars = info.compactMap { entry -> CGRect? in
+            guard entry[kCGWindowOwnerName as String] as? String == "Window Server",
+                  entry[kCGWindowLayer as String] as? Int == Int(CGWindowLevelForKey(.mainMenuWindow)),
+                  let dictionary = entry[kCGWindowBounds as String] as? [String: Any],
+                  let bounds = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+                  bounds.origin == primary.origin, bounds.width == primary.width,
+                  bounds.height.isFinite, bounds.height > 0, bounds.height < primary.height else { return nil }
+            return bounds
+        }
+        guard let bar = bars.first, bars.allSatisfy({ $0 == bar }) else { return nil }
+        return bar
     }
 
     /// Unordered windows are not necessarily backing windows: minimized windows and windows on other Spaces
     /// must remain in this inventory. Exempt only the observed icon and menu-bar backing shapes, never arbitrary
-    /// unnamed or offscreen windows. Titles are used only to prevent exempting a titled window of the same size.
-    static func windowInventory(pid: pid_t, info: [[String: Any]], displays: [CGRect]) -> [Window]? {
+    /// unnamed or offscreen windows. An absent name (including redaction without Screen Recording) is unknown.
+    static func windowInventory(pid: pid_t, info: [[String: Any]], displays: [CGRect], screenRecording: Bool) -> [Window]? {
         var windows: [Window] = [], ids: Set<CGWindowID> = []
+        let menuBar = menuBarBounds(info: info, displays: displays)
         for entry in info {
             guard let owner = entry[kCGWindowOwnerPID as String] as? pid_t else { return nil }
             guard owner == pid else { continue }
@@ -536,15 +566,16 @@ enum ScriptDocuments {
             guard bounds.width > 0, bounds.height > 0 else { continue }
             if let title = entry[kCGWindowName as String], !(title is String) { return nil }
             if let onscreen = entry[kCGWindowIsOnscreen as String], !(onscreen is Bool) { return nil }
-            let titled = (entry[kCGWindowName as String] as? String)?.isEmpty == false
             let onscreen = entry[kCGWindowIsOnscreen as String] as? Bool ?? false
-            if !titled, !onscreen {
-                if bounds.size == CGSize(width: 64, height: 64) { continue }
-                if bounds.height <= 40, displays.contains(where: {
-                    bounds.minX == $0.minX && bounds.minY == $0.minY && bounds.width == $0.width
-                }) { continue }
+            // Finder/TextEdit backing windows measured on macOS 27.2: sharing=read-only, store=nonretained, alpha=1.
+            // All three must be present and exact; window movement/resizing cannot establish these traits.
+            if screenRecording, entry[kCGWindowName as String] as? String == "", !onscreen,
+               entry[kCGWindowSharingState as String] as? Int == Int(CGWindowSharingType.readOnly.rawValue),
+               entry[kCGWindowStoreType as String] as? Int == Int(CGWindowBackingType.backingStoreNonretained.rawValue),
+               entry[kCGWindowAlpha as String] as? Double == 1 {
+                if bounds.size == CGSize(width: 64, height: 64) || bounds == menuBar { continue }
             }
-            windows.append(Window(id: id, bounds: bounds))
+            windows.append(Window(id: id, bounds: bounds, onscreen: onscreen))
         }
         return windows.sorted { $0.id < $1.id }
     }
@@ -555,6 +586,7 @@ enum ScriptDocuments {
         let serverWindows: (pid_t) -> [Window]?
         let windows: (pid_t) -> [Element]?
         let read: (Element) -> AXElement.Read?
+        let windowID: (Element) -> CGWindowID?
         let elements: (Any) -> [Element]?
     }
 
@@ -571,7 +603,7 @@ enum ScriptDocuments {
             guard let serverWindows = source.serverWindows(app.pid), serverWindows.count <= 512 else { return Snapshot(.unavailable) }
             guard let windows = source.windows(app.pid), windows.count <= 128,
                   Set(windows).count == windows.count else { return Snapshot(.unavailable) }
-            var checkedFrames: [Element: CGRect] = [:]
+            var checkedIDs: [Element: CGWindowID] = [:], checkedFrames: [CGWindowID: CGRect] = [:]
             for window in windows {
                 var queue = [(window, false)], seen: Set<Element> = [], tabs: Set<Element> = [], visited = 0
                 while !queue.isEmpty {
@@ -582,11 +614,18 @@ enum ScriptDocuments {
                     if !seen.insert(element).inserted, !tab { continue }
                     guard let read = source.read(element), read.errors.isEmpty else { return Snapshot(.unavailable) }
                     if let role = read.values[kAXRoleAttribute] as? String,
-                       [kAXWindowRole, kAXSheetRole, kAXDrawerRole, "AXPopover", "AXDialog"].contains(role) {
-                        guard let bounds = frame(position: read.values[kAXPositionAttribute], size: read.values[kAXSizeAttribute]) else {
+                       [kAXWindowRole, kAXSheetRole, kAXDrawerRole, "AXPopover"].contains(role) {
+                        guard let bounds = frame(position: read.values[kAXPositionAttribute], size: read.values[kAXSizeAttribute]),
+                              let id = source.windowID(element), id != kCGNullWindowID else {
                             return Snapshot(.unavailable)
                         }
-                        checkedFrames[element] = bounds
+                        if let previous = checkedIDs[element] {
+                            guard previous == id, checkedFrames[id] == bounds else { return Snapshot(.unavailable) }
+                        } else {
+                            guard checkedFrames[id] == nil else { return Snapshot(.unavailable) }
+                            checkedIDs[element] = id
+                            checkedFrames[id] = bounds
+                        }
                     }
                     var values: [String] = []
                     for key in [kAXDocumentAttribute, kAXURLAttribute] {
@@ -612,11 +651,10 @@ enum ScriptDocuments {
             }
             // Sheets/popovers have CG windows of their own but occur under their parent in AX. Conversely Finder
             // includes its desktop scroll area in AXWindows. Require coverage, not equality of those two counts.
-            // Consume each AX frame once so a coincident visible window cannot conceal an unreadable window.
-            var unmatched = Array(checkedFrames.values)
+            // Bind coverage to window identity as well as frame: an AXWindow panel on layer 3 cannot cover a
+            // missing layer-0 document at the same frame. A failed private ID lookup never falls back to frames.
             for window in serverWindows {
-                guard let index = unmatched.firstIndex(of: window.bounds) else { return Snapshot(.unavailable) }
-                unmatched.remove(at: index)
+                guard checkedFrames[window.id] == window.bounds else { return Snapshot(.unavailable) }
             }
             guard ContinuousClock.now < deadline, source.serverWindows(app.pid) == serverWindows,
                   let currentWindows = source.windows(app.pid), Set(currentWindows) == Set(windows),

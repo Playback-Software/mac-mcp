@@ -664,17 +664,28 @@ before the script continues.
 Before execution, before each event to an app and after its send returns (including named System Events process
 targets), the parent checks that app's window `AXDocument` and `AXURL` values through Accessibility. It reads
 `CGWindowListCopyWindowInfo(.optionAll)`, including offscreen windows, and requires each positive-area, layer-zero
-window to match the frame of a checked AX window, sheet, drawer, dialog or popover. Each AX element covers only one
-window-server window. This handles sheets reported as AX descendants and Finder's desktop scroll area reported in
-`AXWindows`, without equating the two raw window counts. Other window layers (including Finder's desktop), empty
-windows, and unnamed offscreen backing windows with these shapes are excluded: 64×64 icons, or strips no more than
-40 points high spanning a display's top edge. Titled windows of those sizes remain checked. Other unnamed or
-offscreen windows are **not** exempt: their metadata cannot establish that they are backing windows rather than
-hidden documents. This can still refuse apps with unclassified backing windows, including Mail's offscreen
+window to match both the window-server ID and frame of a checked AX window, sheet, drawer or popover. The private
+`_AXUIElementGetWindow` lookup binds each AX element to its own window; a failed, null or duplicate ID refuses the
+app rather than falling back to a frame match. A floating panel on another layer cannot cover a coincident document.
+`AXDialog` is a subrole of `AXWindow`, not a separate role. This handles sheets reported as AX descendants and
+Finder's desktop scroll area reported in `AXWindows`, without equating the two raw window counts. Other window
+layers (including Finder's desktop), empty windows, and narrowly classified backing windows are excluded.
+Backing exemptions require a non-prompting Screen
+Recording preflight and an explicitly present, empty `kCGWindowName` in the fresh window inventory; a missing name
+never counts as empty. Without that permission, no backing shapes are exempt. The synchronous preflight can cache
+a denial, conservatively disabling exemptions until restart; a cached grant alone cannot exempt a window whose
+live title key is redacted. The window must also be offscreen, with `kCGWindowSharingState == 1` (read-only),
+`kCGWindowStoreType == 1` (nonretained) and `kCGWindowAlpha == 1`, as measured on Finder/TextEdit backing windows.
+The only exempt shapes are exactly 64×64, or exactly the primary display's menu-bar frame. The latter comes from
+the `Window Server` window at the system menu layer spanning the primary display's top edge, including its exact
+height (33 points on the observed notched display). No guessed height, tolerance or secondary-display strip is
+exempt; missing or conflicting system menu-bar frames disable the strip exemption. Titled windows of those sizes
+remain checked. Other unnamed or offscreen windows are **not** exempt: their metadata cannot establish that they
+are backing windows rather than hidden documents. This can still refuse apps with unclassified backing windows, including Mail's offscreen
 500×500 and 100×132 windows observed on macOS 27.2. Their onscreen 470×416 sheet is checked through AX.
-Window IDs, frames and AX window membership must stay consistent through the walk. Windows on another Space or
-minimized windows must be exposed by AX; a candidate missing from AX refuses the app rather than assuming it is
-harmless. It checks document/URL values in window descendants and every tab
+Window IDs, frames, onscreen state and AX window membership must stay consistent through the walk. Windows on
+another Space or minimized windows must be exposed by AX; a candidate missing from AX refuses the app rather than
+assuming it is harmless. It checks document/URL values in window descendants and every tab
 exposed by AX tab groups or `AXTabs`. A tab without a readable URL/document refuses the app; Safari also requires a
 tab inventory for every window. If any checked value identifies a protected file, the
 whole app is refused until a person closes that document. This covers reading a document already open and editing
