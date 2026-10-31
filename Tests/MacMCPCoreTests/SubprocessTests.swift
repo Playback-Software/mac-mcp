@@ -31,7 +31,8 @@ import Testing
     }
 
     @Test func errorsComeBackOnStderr() async throws {
-        let r = try await Scripts.run("error \"boom\"", language: .applescript, timeout: 10)
+        // A cold script host on a slow machine (a CI virtual machine) can take several seconds to start.
+        let r = try await Scripts.run("error \"boom\"", language: .applescript, timeout: 30)
         #expect(r.status != 0 && r.stderr.contains("boom"))
     }
 

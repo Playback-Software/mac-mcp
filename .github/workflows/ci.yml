@@ -32,8 +32,9 @@ jobs:
         run: swift build
 
       # Integration tests drive the installed agent and TestHost in a GUI session, so they are not run here.
+      # Serially: hosted runners have few cores, and some unit tests bound how long a cancellation may take.
       - name: Unit tests
-        run: swift test --skip IntegrationTests
+        run: swift test --skip IntegrationTests --no-parallel
 
       - name: Lint
         run: scripts/lint-blocking.sh
