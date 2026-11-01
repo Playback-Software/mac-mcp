@@ -107,15 +107,18 @@ enum ActionTools {
             """,
         properties: [
             "app": Prop.string(),
-            "path": Prop.string("\"Format > Make Plain Text\" or [\"File\", \"Save As…\"]; ignores case and ellipses."),
+            "path": Prop.string("Steps separated by \" > \", e.g. \"File > Save As…\"; ignores case and ellipses."),
         ],
         required: ["path"],
         annotations: .action,
         deadline: { _ in lockedDeadline(actionDeadline) }
     ) { args, _ in
         let raw = args.raw["path"]
-        let path: [String] = raw?.arrayValue?.compactMap(\.stringValue)
-            ?? (args.string("path") ?? "").components(separatedBy: ">").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        let text = (args.string("path") ?? "").trimmingCharacters(in: .whitespaces)
+        // Some clients send the array form as a JSON string: '["File", "Save As…"]'.
+        let encoded = text.hasPrefix("[") ? (try? JSONDecoder().decode([String].self, from: Data(text.utf8))) : nil
+        let path: [String] = raw?.arrayValue?.compactMap(\.stringValue) ?? encoded
+            ?? text.components(separatedBy: ">").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         guard !path.isEmpty else { return .error("path is required, e.g. \"File > Save As…\".") }
         if let refusal = SessionSafety.refusal(menuPath: path) { return .error(refusal) }
         if let refused = await RouteGuards.menu(path, app: args.string("app")) { return refused }

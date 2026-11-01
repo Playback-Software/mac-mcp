@@ -15,4 +15,7 @@ if [[ "$agent_pause_status" != *"Agents are running (not paused)."* ]]; then
 fi
 export MAC_MCP_LEASE=$("$CLI" lease acquire --holder integration-tests --reason "swift test" --minutes 30 --pid $$)
 trap '"$CLI" lease release "$MAC_MCP_LEASE" >/dev/null' EXIT
-MAC_MCP_INTEGRATION=1 swift test --filter IntegrationTests "$@"
+# swift test runs what any --filter matches, so a filter given here replaces the default instead of adding to it.
+filter=(--filter IntegrationTests)
+[[ " $* " == *" --filter "* ]] && filter=()
+MAC_MCP_INTEGRATION=1 swift test "${filter[@]}" "$@"

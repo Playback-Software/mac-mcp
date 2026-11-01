@@ -662,9 +662,28 @@ relaunched by its bundle-ID address. Asynchronous app events are refused because
 before the script continues.
 
 Before execution, before each event to an app and after its send returns (including named System Events process
-targets), the parent checks that app's window `AXDocument` and `AXURL` values through Accessibility. It compares the
-AX window count with all windows reported by `CGWindowListCopyWindowInfo(.optionAll)`, including other
-Spaces and full screen, and refuses mismatches. It checks document/URL values in window descendants and every tab
+targets), the parent checks that app's window `AXDocument` and `AXURL` values through Accessibility. It reads
+`CGWindowListCopyWindowInfo(.optionAll)`, including offscreen windows, and requires each positive-area, layer-zero
+window to match both the window-server ID and frame of a checked AX window, sheet, drawer or popover. The private
+`_AXUIElementGetWindow` lookup binds each AX element to its own window; a failed, null or duplicate ID refuses the
+app rather than falling back to a frame match. A floating panel on another layer cannot cover a coincident document.
+`AXDialog` is a subrole of `AXWindow`, not a separate role. This handles sheets reported as AX descendants and
+Finder's desktop scroll area reported in `AXWindows`, without equating the two raw window counts. Other window
+layers (including Finder's desktop), empty windows, and narrowly classified backing windows are excluded.
+Helper-window exemptions require a non-prompting Screen
+Recording preflight and an explicitly present, empty `kCGWindowName` in the fresh window inventory; a missing name
+never counts as empty. Without that permission, no window is exempt. The synchronous preflight can cache
+a denial, conservatively disabling exemptions until restart; a cached grant alone cannot exempt a window whose
+live title key is redacted. The window must also be offscreen, with `kCGWindowSharingState == 1` (read-only),
+`kCGWindowStoreType == 1` (nonretained) and `kCGWindowAlpha == 1`, as measured on Finder, TextEdit and Mail helper
+windows. Size doesn't count: those helper windows vary (64×64 and 500×500 icon windows, Mail's 100×132 one,
+menu-bar strips), and the same app's can change size between sessions. The rule rests on the title instead: a
+document window takes its file's name, and a file can't have an empty name, so an offscreen window whose title is
+present and empty isn't a document. Titled offscreen windows, windows whose title can't be read, and every onscreen
+window must match an AX element by window ID.
+Window IDs, frames, onscreen state and AX window membership must stay consistent through the walk. Windows on
+another Space or minimized windows must be exposed by AX; a candidate missing from AX refuses the app rather than
+assuming it is harmless. It checks document/URL values in window descendants and every tab
 exposed by AX tab groups or `AXTabs`. A tab without a readable URL/document refuses the app; Safari also requires a
 tab inventory for every window. If any checked value identifies a protected file, the
 whole app is refused until a person closes that document. This covers reading a document already open and editing
@@ -675,8 +694,9 @@ The disposable host asks the parent afresh through a private local socket; it
 does not need its own Accessibility grant. These checks inspect the current windows and cannot make the check and
 an app's later handling of an event atomic with a person's concurrent actions.
 
-AX cannot establish which scripted document or tab a window backs. Before each event using document/tab object
-specifiers (including collections, nested properties, dictionary-defined document subclasses and current-document/tab
+AX cannot establish which scripted document or tab a window backs. The file-inventory gate below applies to
+document/tab selectors, not every app event, so it does not replace the window-coverage preflight. Before each event
+using document/tab object specifiers (including collections, nested properties, dictionary-defined document subclasses and current-document/tab
 properties), the host therefore asks the app itself for its complete file inventory. This is one read-only `get`
 event for paths only, sent through the same policy, Automation, PID and before/after AX gates; its reply never reaches
 the script. The host reads the app's local scripting dictionary once per script run to select a readable document
@@ -685,7 +705,7 @@ the URL of every tab of every window, covering background tabs as well as the ac
 
 Every returned file must resolve locally and pass ProtectedPaths; Safari file URLs receive the same check, while
 ordinary absolute web URLs are allowed. Explicit no-file values for untitled, never-saved documents are allowed.
-The document count must equal the checked AX/CG window inventory, including native document tabs; Safari's nested
+The document count must equal the checked AX window inventory, including native document tabs; Safari's nested
 tab counts must match the checked tab counts for all windows. Counts and the pinned PID must stay consistent across
 the inventory query. Missing or unreadable properties, unresolved values and mismatched counts keep the existing
 document/tab-reference refusal. Thus `text of document 1` and `close tab 1` work only with a complete, safe inventory.

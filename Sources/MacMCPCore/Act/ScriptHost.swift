@@ -292,6 +292,12 @@ public enum ScriptHost {
                     if let reply {
                         let response: NSAppleEventDescriptor
                         if ScriptHost.propertyCode(descriptor.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))) == "ppth", let ref {
+                            // Model Cocoa's collection selector validation, not just its path reply.
+                            let paths = descriptor.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))
+                            let documents = paths?.forKeyword(AEKeyword(keyAEContainer))
+                            guard let ordinal = documents?.forKeyword(AEKeyword(keyAEKeyData)),
+                                  ordinal.descriptorType == typeAbsoluteOrdinal,
+                                  ordinal.data == NSAppleEventDescriptor(enumCode: OSType(kAEAll)).data else { return OSErr(errAEWrongDataType) }
                             let gate = Unmanaged<Gate>.fromOpaque(ref).takeUnretainedValue()
                             response = NSAppleEventDescriptor(eventClass: ScriptHost.codeValue("aevt"), eventID: ScriptHost.codeValue("ansr"), targetDescriptor: nil,
                                                                returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
@@ -738,7 +744,9 @@ public enum ScriptHost {
                 record.setDescriptor(container, forKeyword: AEKeyword(keyAEContainer))
                 return record.coerce(toDescriptorType: typeObjectSpecifier)
             }
-            let all = NSAppleEventDescriptor(enumCode: OSType(kAEAll))
+            // Cocoa rejects enum/all as an absolute-position selector. AppleScript uses abso/all for `every`.
+            guard let all = NSAppleEventDescriptor(descriptorType: typeAbsoluteOrdinal,
+                                                   data: NSAppleEventDescriptor(enumCode: OSType(kAEAll)).data) else { return nil }
             var container = NSAppleEventDescriptor.null()
             if tabs {
                 guard let windows = object("cwin", form: OSType(formAbsolutePosition), key: all, container: container) else { return nil }
