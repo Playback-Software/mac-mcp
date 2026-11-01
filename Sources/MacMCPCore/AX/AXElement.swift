@@ -138,17 +138,26 @@ public struct AXElement: @unchecked Sendable, Hashable {
         return err != .invalidUIElement
     }
 
+    public func isSettable(_ name: String) -> Bool {
+        var settable: DarwinBoolean = false
+        return AXUIElementIsAttributeSettable(raw, name as CFString, &settable) == .success && settable.boolValue
+    }
+
     // MARK: Writing
 
     @discardableResult
     public func set(_ name: String, _ value: Any) -> AXError {
         guard AgentSafety.refusal(pid: pid) == nil else { return .cannotComplete }
+        guard !BackgroundMode.enabled || BackgroundMode.allows(attribute: name) else { return .cannotComplete }
         return Self.mutate { AXUIElementSetAttributeValue(raw, name as CFString, value as CFTypeRef) }
     }
 
     @discardableResult
     public func perform(_ action: String) -> AXError {
         guard AgentSafety.refusal(pid: pid) == nil else { return .cannotComplete }
+        guard !BackgroundMode.enabled || BackgroundMode.allows(action: action) else { return .cannotComplete }
+        if BackgroundMode.enabled, BackgroundMode.actionRefusal(action, role: role) != nil
+            || BackgroundMode.menuRefusal(self) != nil { return .cannotComplete }
         return Self.mutate { AXUIElementPerformAction(raw, action as CFString) }
     }
 

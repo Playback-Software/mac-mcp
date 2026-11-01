@@ -128,6 +128,11 @@ claude mcp add mac -- ssh you@your-mac /Users/you/.local/bin/mac-mcp
 
 `mac-mcp remote-setup` checks this Mac and prints the exact commands for another machine.
 
+For work alongside the person using the Mac, add `--background` to this client's MCP server arguments (for
+example, `"args": ["--background"]`). This opt-in uses accessibility actions and app-targeted keys without activating
+apps or moving the pointer, and captures app windows even when covered. Unsupported input is refused; only the
+person can change the client configuration. `mac_doctor` and tool results show the mode; it is off by default.
+
 ### Claude Code plugin
 
 On the Mac itself, Claude Code can install the server entry together with a skill for driving macOS (the

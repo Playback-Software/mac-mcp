@@ -1,6 +1,7 @@
 // mac-mcp: command-line companion to MacMCP.app.
 //
-//   mac-mcp [relay]        Pipe stdio to the agent's socket. This is what MCP clients run, locally or as
+//   mac-mcp [relay] [--background]
+//                          Pipe stdio to the agent's socket. This is what MCP clients run, locally or as
 //                          `ssh <mac> mac-mcp`. It passes messages through unchanged, reading just enough of
 //                          them to reconnect and replay the handshake when the agent restarts.
 //   mac-mcp doctor         Health report (asks the agent; falls back to local checks if it can't).
@@ -56,10 +57,11 @@ final class Relay: @unchecked Sendable {
     private var fd: Int32
     private var writer: StreamWriter
     private var stdinOpen = true
-    private let directive = AgentClient.directive(lease: LeaseStore.ownToken, origin: AgentClient.origin(),
-                                                  session: AgentClient.newSessionID())
+    private let directive: Data?
 
-    init(fd: Int32) throws {
+    init(fd: Int32, background: Bool) throws {
+        directive = AgentClient.directive(lease: LeaseStore.ownToken, origin: AgentClient.origin(),
+                                          session: AgentClient.newSessionID(), background: background)
         self.fd = fd
         self.writer = StreamWriter(fd: fd)
         try StreamIO.configure(fd)
@@ -187,9 +189,9 @@ final class Relay: @unchecked Sendable {
     }
 }
 
-func relay() -> Never {
+func relay(background: Bool = false) -> Never {
     do {
-        try Relay(fd: UnixSocket.connect(path: Paths.socket)).run()
+        try Relay(fd: UnixSocket.connect(path: Paths.socket), background: background).run()
     } catch {
         fail(unreachable(error))
     }
@@ -732,8 +734,9 @@ func setup(_ args: [String]) -> Never {
 var args = Array(CommandLine.arguments.dropFirst())
 let command = args.isEmpty ? "relay" : args.removeFirst()
 switch command {
-case "relay":
-    relay()
+case "--background", "relay":
+    do { relay(background: try RelayOptions(command == "--background" ? [command] + args : args).background) }
+    catch { fail("\(error)") }
 case "doctor":
     doctor()
 case "call":
@@ -788,7 +791,7 @@ case "logs":
 case "version", "--version":
     say("mac-mcp \(cliVersion)")
 case "help", "--help", "-h":
-    say("usage: mac-mcp [relay | doctor | setup | install [--client NAME [--name mac] [--remote user@host] [--dry-run] [--create]] | uninstall [--purge | --client NAME [--name mac] [--dry-run]] | start | stop | restart | status | pause | resume | "
+    say("usage: mac-mcp [relay [--background] | --background | doctor | setup | install [--client NAME [--name mac] [--remote user@host] [--dry-run] [--create]] | uninstall [--purge | --client NAME [--name mac] [--dry-run]] | start | stop | restart | status | pause | resume | "
         + "logs [--audit] [-n N] | call <tool> [json] | lease acquire|release|status | alerts setup|test|off|status | policy approve [--expect-sha256 HEX]|status|prune | report [--since 7d] [--top N] | remote-setup [--name mac] | version]")
 default:
     fail("unknown command '\(command)'. Try `mac-mcp help`.")

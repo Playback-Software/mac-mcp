@@ -28,6 +28,8 @@ public enum AppControl {
     public static func launch(_ query: String, open target: URL? = nil, activate: Bool = true) async throws -> AppInfo {
         try AgentPause.permit?.check()
         try Task.checkCancellation()
+        if BackgroundMode.enabled, target != nil { throw ActionError(BackgroundMode.refusal("open files or URLs through app launch")) }
+        let activate = activate && !BackgroundMode.enabled
         let existing = try? Apps.resolve(query)
         guard let appURL = existing?.bundlePath.map(URL.init(fileURLWithPath:)) ?? Apps.bundleURL(for: query) else {
             throw AppControlError.notInstalled(query)
@@ -87,7 +89,7 @@ public enum AppControl {
     /// agent, so it falls back to the accessibility "frontmost" attribute. Returns whether the app ended up frontmost.
     @discardableResult
     public static func activate(_ app: AppInfo) async -> Bool {
-        guard !Task.isCancelled, AgentPause.permit?.isRevoked != true else { return false }
+        guard !BackgroundMode.enabled, !Task.isCancelled, AgentPause.permit?.isRevoked != true else { return false }
         guard let running = NSRunningApplication(processIdentifier: app.pid) else { return false }
         if running.isHidden {
             guard !Task.isCancelled, AgentPause.permit?.isRevoked != true else { return false }
@@ -112,6 +114,7 @@ public enum AppControl {
     }
 
     public static func hide(_ app: AppInfo) -> Bool {
+        guard !BackgroundMode.enabled else { return false }
         guard let running = NSRunningApplication(processIdentifier: app.pid), !Task.isCancelled, AgentPause.permit?.isRevoked != true else { return false }
         return running.hide()
     }
@@ -134,6 +137,7 @@ public enum AppControl {
     }
 
     public static func quit(_ app: AppInfo, force: Bool) async -> QuitOutcome {
+        guard !BackgroundMode.enabled else { return .stillRunning }
         guard let running = NSRunningApplication(processIdentifier: app.pid) else { return .quit }
         guard !Task.isCancelled, AgentPause.permit?.isRevoked != true else { return .stillRunning }
         _ = force ? running.forceTerminate() : running.terminate()
@@ -223,6 +227,7 @@ public enum WindowControl {
     }
 
     public static func focus(_ app: AppInfo, _ w: WindowEntry) async -> Bool {
+        guard !BackgroundMode.enabled else { return false }
         if w.isMinimized { w.element.set(kAXMinimizedAttribute, kCFBooleanFalse as Any) }
         w.element.perform(kAXRaiseAction)
         w.element.set(kAXMainAttribute, kCFBooleanTrue as Any)

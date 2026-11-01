@@ -12,7 +12,7 @@ enum DoctorTool {
         annotations: .readOnly
     ) { _, context in
         let screenRecording = await SessionState.screenRecordingLive()
-        let captureFailure = screenRecording ? await testCapture() : nil
+        let captureFailure = screenRecording && !BackgroundMode.enabled ? await testCapture() : nil
         let automation = await automationLines()
         let lock = await ActionLock.shared.status
         let health = await HealthMonitor.shared.check(alert: false)
@@ -74,6 +74,7 @@ enum DoctorTool {
 
         var lines = ["mac-mcp \(MacMCPServer.version) — agent pid \(getpid()), client: \(client)", ""]
         lines.append("Session")
+        lines.append("      background mode: " + (BackgroundMode.enabled ? "enabled (--background, per client); display capture diagnostic skipped" : "off (foreground input)"))
         lines.append("  \(mark(state.onConsole)) GUI session on console: \(state.onConsole ? "yes" : "NO — log in via Remote Access")")
         lines.append("  \(mark(!state.screenLocked)) screen: \(state.screenLocked ? "LOCKED — unlock via Remote Access" : "unlocked")")
         lines.append("  \(mark(!state.displayAsleep)) display: \(state.displayAsleep ? "ASLEEP — wake it via Remote Access" : "awake")")

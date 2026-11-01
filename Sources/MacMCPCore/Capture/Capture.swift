@@ -148,10 +148,17 @@ public enum Capture {
         error.domain == SCStreamErrorDomain && error.code == -3811
     }
 
+    static func permitsDisplayFallback(hasApp: Bool, error: NSError) -> Bool {
+        hasApp && !BackgroundMode.enabled && isStreamStartFailure(error)
+    }
+
     public static func take(_ req: Request, store: ScreenshotStore = .shared) async throws -> Screenshot {
+        if BackgroundMode.enabled, req.app == nil {
+            throw ActionError(BackgroundMode.refusal("capture a display; pass app= for a window capture"))
+        }
         let content: SCShareableContent
         do {
-            content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: !BackgroundMode.enabled)
         } catch {
             throw CGPreflightScreenCaptureAccess() ? CaptureError.failed("\(error)") : CaptureError.permission
         }
@@ -210,7 +217,7 @@ public enum Capture {
         let image: CGImage
         do {
             image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
-        } catch let first as NSError where req.app != nil && Self.isStreamStartFailure(first) {
+        } catch let first as NSError where Self.permitsDisplayFallback(hasApp: req.app != nil, error: first) {
             // A window with a sheet or popover attached sometimes can't be captured on its own. Crop the display
             // instead: the same pixels, plus whatever overlaps the window.
             let displays = Displays.all()
@@ -234,6 +241,10 @@ public enum Capture {
             }
             subject += " (captured from the display: the window couldn't be captured alone)"
         } catch {
+            if BackgroundMode.enabled {
+                throw CaptureError.failed("background mode requires a window capture; the app/OS could not provide one. "
+                    + "Retry mac_screenshot app=, or ask a person to use a foreground client. No display fallback was used. (\(error))")
+            }
             throw CaptureError.failed("\(error)")
         }
         let mapping = ScreenshotMapping(source: source, pixelSize: CGSize(width: image.width, height: image.height), window: captured)

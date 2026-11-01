@@ -22,18 +22,19 @@ public final class AgentClient {
     /// Connects to the agent's socket.
     /// Presents `lease` (default: this process's MAC_MCP_LEASE) so its calls may act while that lease is held.
     public convenience init(clientName: String, version: String, path: String = Paths.socket, timeout: TimeInterval = 30,
-                            lease: String? = LeaseStore.ownToken) throws {
+                            lease: String? = LeaseStore.ownToken, background: Bool = false) throws {
         try Self.validate(timeout)
         let deadline = StreamIO.now + timeout
         let fd = try UnixSocket.connect(path: path, deadline: deadline)
         try self.init(clientName: clientName, version: version, input: fd, output: fd, timeout: timeout,
-                      initialDeadline: deadline, preamble: Self.directive(lease: lease))
+                      initialDeadline: deadline, preamble: Self.directive(lease: lease, background: background))
     }
 
     /// The line a client sends before any JSON-RPC: a GUI lease token (see `Lease`), and for the relay, where the
     /// session comes from and a session id that stays the same across agent restarts (for the usage report).
-    public static func directive(lease: String?, origin: String? = nil, session: String? = nil) -> Data? {
-        let fields = [lease.map { "lease=\($0)" }, origin.map { "origin=\($0)" }, session.map { "session=\($0)" }]
+    public static func directive(lease: String?, origin: String? = nil, session: String? = nil, background: Bool = false) -> Data? {
+        let fields = [lease.map { "lease=\($0)" }, origin.map { "origin=\($0)" }, session.map { "session=\($0)" },
+                      background ? "background=true" : nil]
             .compactMap { $0 }
         return fields.isEmpty ? nil : Data(("#mac-mcp " + fields.joined(separator: " ") + "\n").utf8)
     }

@@ -233,6 +233,11 @@ public enum Actions {
 
     /// The process an action will affect, for the before/after snapshots.
     public static func pid(for target: Target?, app: String?) async throws -> pid_t {
+        if BackgroundMode.enabled {
+            if let target {
+                guard case .ref = target else { throw ActionError(BackgroundMode.refusal("act on coordinates or screenshot pixels")) }
+            } else if app == nil { throw ActionError(BackgroundMode.refusal("choose an input app from system focus; pass app=")) }
+        }
         if case let .ref(r)? = target {
             guard let e = await RefStore.shared.entry(r) else { throw ActionError(await RefStore.shared.missingMessage(r)) }
             return e.pid
@@ -259,6 +264,9 @@ public enum Actions {
     /// empty label can be trusted, so a snapshot truncated elsewhere in a large app doesn't refuse every unnamed
     /// control.
     public static func resolve(_ target: Target, currentSnapshot: Int, refs: RefStore = .shared) async throws -> Resolved {
+        if BackgroundMode.enabled {
+            guard case .ref = target else { throw ActionError(BackgroundMode.refusal("act on coordinates or screenshot pixels")) }
+        }
         switch target {
         case let .point(p):
             // Off every display nothing owns the point, which later checks would misreport as the app having quit.
@@ -347,6 +355,7 @@ public enum Actions {
 
     /// Brings the target's app (and window) to the front before synthesized input.
     static func bringForward(_ r: Resolved) async throws {
+        try BackgroundMode.requireForeground("activate an app or raise a window")
         guard let running = NSRunningApplication(processIdentifier: r.pid), !running.isTerminated else {
             throw ActionError("The target app quit. Open it and take a new mac_snapshot before sending input.")
         }
@@ -548,6 +557,7 @@ public enum Actions {
     /// Clicks. Prefers the accessibility press (no cursor movement, works when partly covered); falls back to a mouse
     /// click at a hit-tested point. Returns how it clicked.
     public static func click(_ r: Resolved, button: Input.Button, count: Int, modifiers: CGEventFlags) async throws -> String {
+        if BackgroundMode.enabled { return try await backgroundClick(r, button: button, count: count, modifiers: modifiers) }
         try await Input.check(pid: r.pid)
         if let el = r.element {
             let role = el.role ?? ""
@@ -585,6 +595,7 @@ public enum Actions {
 
     /// Focuses the field (if given), types, and reads the value back. Returns a note for the response.
     public static func type(_ r: Resolved?, pid: pid_t, text: String, mode: TypeMode, submit: Bool) async throws -> String {
+        if BackgroundMode.enabled { return try await backgroundType(r, pid: pid, text: text, mode: mode, submit: submit) }
         let app = AXElement.application(pid: pid)
         var field = r?.element
         if let r, let el = r.element {
@@ -710,6 +721,7 @@ public enum Actions {
 
     public static func keys(_ specs: [KeySpec], repeat count: Int, pid: pid_t) async throws {
         if let refusal = OpenRoutes.keySequenceRefusal(specs, repeat: count) { throw ActionError(refusal, audit: "Refused: key sequence") }
+        if BackgroundMode.enabled { return try await backgroundKeys(specs, repeat: count, pid: pid) }
         try await bringForward(Resolved(pid: pid, element: nil, row: nil, point: nil))
         try await press(specs, repeat: count, pid: pid)
     }
@@ -737,6 +749,9 @@ public enum Actions {
     /// Picks a menu item by path, through accessibility only. Lists the available items when a step doesn't match.
     public static func menu(pid: pid_t, path: [String]) async throws -> String {
         let app = AXElement.application(pid: pid)
+        if BackgroundMode.enabled, Snapshotter.menuIsOpen(app) {
+            throw ActionError(BackgroundMode.refusal("dismiss an open menu with foreground keys; ask a person to close it"))
+        }
         // While another menu is open (a pop-up left open), macOS is tracking it and menu-bar commands don't run.
         for _ in 0..<3 where Snapshotter.menuIsOpen(app) {
             try await Input.press(KeySpec(key: 53, flags: []), pid: pid)   // esc
@@ -767,6 +782,7 @@ public enum Actions {
                 var submenu = item.elements(kAXChildrenAttribute).first
                 var items = submenu?.elements(kAXChildrenAttribute) ?? []
                 if items.isEmpty {   // menus some apps build only when opened
+                    try BackgroundMode.requireForeground("open a menu to discover its items; use an already exposed menu command")
                     try await Input.check(pid: pid, route: .target(item, point: nil, pid: pid, opens: false))
                     item.perform(kAXPressAction)
                     try await Task.sleep(for: .milliseconds(250))
@@ -784,11 +800,21 @@ public enum Actions {
             throw ActionError(refusal, audit: "Refused: menu route")
         }
         if target.attribute(kAXEnabledAttribute) as? Bool == false {
+            if BackgroundMode.enabled { throw ActionError(BackgroundMode.refusal("choose this disabled menu item while the app is inactive")) }
             AXElement.application(pid: pid).element(kAXMenuBarAttribute)?.elements(kAXChildrenAttribute).first?.perform(kAXCancelAction)
             throw ActionError("Menu item \(Untrusted.inline(walked.joined(separator: " > "))) is disabled right now.")
         }
+        if BackgroundMode.enabled {
+            if let refusal = BackgroundMode.actionRefusal(kAXPressAction, role: target.role) ?? BackgroundMode.menuRefusal(target) {
+                throw ActionError(refusal)
+            }
+            try await checkBackground(target, pid: pid)
+        }
         try await Input.check(pid: pid, route: .target(target, point: nil, pid: pid, opens: false))
         guard target.perform(kAXPressAction) == .success else {
+            if BackgroundMode.enabled {
+                throw ActionError(BackgroundMode.refusal("confirm the menu press; it may have applied, so inspect mac_snapshot before retrying"))
+            }
             throw ActionError("Could not choose \(Untrusted.inline(walked.joined(separator: " > "))).")
         }
         return walked.joined(separator: " > ")
@@ -813,6 +839,7 @@ public enum Actions {
 
     public static func scroll(_ r: Resolved?, pid: pid_t, direction: Direction, amount: Int,
                               unit: Input.ScrollUnit = .line, modifiers: CGEventFlags = []) async throws -> String {
+        try BackgroundMode.requireForeground("scroll with the pointer; use mac_scroll to_ref")
         try await bringForward(r ?? Resolved(pid: pid, element: nil, row: nil, point: nil))
         // After bringForward, so a screenshot target is checked against the activated window.
         let given: CGPoint? = if let r, r.element == nil, r.point != nil { try await actionPoint(r) } else { nil }
@@ -868,6 +895,19 @@ public enum Actions {
 
     public static func scrollIntoView(_ r: Resolved) async throws -> ActionSummary {
         guard let el = r.element else { throw ActionError("to_ref needs a ref.") }
+        if BackgroundMode.enabled {
+            try await checkBackground(el, pid: r.pid, row: r.row)
+            guard el.perform("AXScrollToVisible") == .success else {
+                throw ActionError(BackgroundMode.refusal("scroll this element through accessibility"))
+            }
+            try await Task.sleep(for: .milliseconds(150))
+            let visible = try await Input.guardWork {
+                guard let f = frameOf(el) else { return false }
+                return visibleFrame(of: el, frame: f).contains(CGPoint(x: f.midX, y: f.midY))
+            }
+            guard visible else { throw ActionError(BackgroundMode.refusal("verify that AX scrolling made the element visible")) }
+            return scrolled(r)
+        }
         try await Input.check(pid: r.pid)
         let area = try await Input.guardWork { () -> AXElement? in
             var current = el.element(kAXParentAttribute), seen = Set<AXElement>()
@@ -949,6 +989,7 @@ public enum Actions {
     }
 
     public static func drag(from a: Resolved, to b: Resolved, timing: Input.DragTiming = Input.DragTiming()) async throws -> String {
+        try BackgroundMode.requireForeground("drag the pointer")
         func point(_ r: Resolved) async throws -> CGPoint {
             if r.point != nil { return try await actionPoint(r) }   // after bringForward, so screenshot pixels see the activated window
             guard let el = r.element else { throw ActionError("Nothing to drag.") }
@@ -997,6 +1038,7 @@ public enum Actions {
     /// Moves the pointer onto the target without clicking, waits, and reports any tooltip: the help text of the
     /// element under the pointer and any help-tag window the app shows.
     public static func hover(_ r: Resolved, waitMs: Int) async throws -> ActionSummary {
+        try BackgroundMode.requireForeground("hover the pointer")
         let p: CGPoint
         if let el = r.element {
             try await bringForward(r)

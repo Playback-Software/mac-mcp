@@ -199,6 +199,67 @@ MacMCP gives whoever can reach it control of the Mac's GUI. The socket is owner-
 listener, and remote access goes through SSH. Password-field values are never shown. Actions refuse to touch macOS
 security and permission prompts, and apps on the policy's deny list.
 
+### Background mode
+
+Background mode is a per-client restriction chosen by the person in the client's MCP command arguments:
+`mac-mcp --background`. It defaults off and is not a policy key, tool parameter or model-controlled setting.
+ProtectedPaths already blocks edits to the MCP clients' settings. The relay strips injected directives and resends
+its own immutable mode after reconnecting; the agent reads it only before JSON-RPC starts. A direct socket client
+can choose its mode, as it can already run code as the account; this does not authenticate a human at the socket.
+Enabled sessions identify themselves in instructions, tool results and `mac_doctor`.
+Unknown relay arguments are errors, so a misspelled `--background` cannot silently select foreground mode.
+
+The mode forbids MacMCP activation, window focusing/raising, pointer input and system-wide HID events. AX actions,
+value/selection writes and window-filter captures are available; PID-targeted keys require exact app-local focus
+and same-process window ownership. Remote helpers and unknown focus refuse instead of using system focus. Key
+delivery is unverified unless an observable result confirms it; typing always reads its resulting value back.
+Append/insert use AXSelectedTextRange plus AXSelectedText when both are settable; only replace may write the whole
+AXValue. Keyboard fallback requires exact app-local focus. Unreadable values or insertion carets and concurrent
+value/selection changes refuse; read-back must match the expected edit. `submit=true` checks Return delivery before
+any write. If Return later fails, the result says the text was written and submission is unconfirmed, rather than
+reporting the whole edit as refused.
+
+There is no foreground retry. Unsupported routes explain background mode and ask for an AX route or for the person
+to configure a foreground client. Finder and file-panel mutations, secure fields, window controls/management,
+clipboard writes, scripts, running Shortcuts and Safari automation are conservatively unavailable. Launching is
+allowed without activation, but opening URLs/files through launch is refused. See [Tools](tools.md#background-mode).
+
+Background key rules refuse ⌘Tab, ⌘grave, ⌘Q, ⌘H, ⌃⌘F, ⌘M, ⌥⌘M, ⌥⌘Esc, ⌘W, ⌘C and ⌘X,
+including chords with additional modifiers; all F1–F20 keys, any Fn-modified key and Control-arrow keys also refuse.
+In one call (including repeats), Space, Return or Enter cannot follow Tab, an arrow, Home, End, Page Up, Page Down,
+Escape, Space, Return or Enter. Inspect a snapshot and send a separate call after a focus-moving key.
+
+Background menu rules refuse Copy/Cut; close, minimize, zoom and full-screen commands; Hide, Hide Others, Quit and
+Force Quit; and every Window-menu command, including moving, resizing, tiling, arranging and switching windows or
+Spaces. These checks use AX identifiers and exposed action/selector metadata; titles are fallbacks only when an
+identifier is absent. A menu item's key equivalent is not a typed shortcut and does not invoke the background key
+rules. Existing foreground menu policy checks still apply. `mac_clipboard action=set` also refuses.
+
+AXShowMenu and AXPress on menu-bar items, pop-up buttons, menu buttons and submenu parents refuse because they can
+leave an inactive app tracking a menu and taking the person's keyboard. Use `mac_menu` for an already exposed leaf
+command, or ask a person to reconnect without `--background`. AXSelected writes and AXIncrement/AXDecrement actions
+are excluded from the background AX allowlist.
+
+| Existing guard | Background enforcement |
+| --- | --- |
+| Policy and denied apps | Same admission and target/element app-policy checks, repeated at input steps; mode grants no app permission |
+| Protected paths and open routes | Same element and field-edit checks on the explicit AX target. Coordinate, Finder, file-panel and launch `open=` routes refuse |
+| Finder selection, rename, copy/paste and drop checks | Finder mutations refuse; no background hit test or global-focus substitute |
+| File panels and remote services | Panel actions and remote AX receivers refuse. The target app's own windows/sheets are checked even without a focused window; unreadable ownership or panel inventories fail closed |
+| Services, launchers and key sequences | Existing checks still run against the target app's menus and explicit typing field. App/window switching and system focus shortcuts also refuse |
+| Secure Input and macOS prompts | Any visible security prompt blocks input; background input additionally refuses while Secure Input is enabled, and refuses secure fields |
+| Ref identity, target and modality | Resolve retains shown-ref checks; AX writes recheck ownership, identity and modal blockers. Targeted keys recheck the same app-local element and window on every step |
+| GUI lease, claims and action lock | Same GUI resource, admission/rechecks, rate limiter and serialization; background sessions receive no concurrency bypass |
+| Kill switch, pause, cancellation and deadlines | Same revocable permits and input sessions; paired releases stay PID-targeted, and no pointer cleanup can start |
+| Audit and redaction | Same dispatcher, argument/detail redaction and untrusted-text marks, including background refusals; no typed values added to diagnostics |
+| Capture and verification | Window-filter pixels only, with no display fallback; target-app AX settle/diffs and typed-value verification remain in place |
+
+The app may independently open UI or activate in response to a command. MacMCP does not call activation to make it
+work, but cannot control an application's implementation of AXPress or a menu action. Validate background behavior
+in each app and macOS version. PID delivery has no delivery acknowledgement from the intended control; an unchanged
+diff is not proof the key arrived. Cancellation also cannot recall an AX request already sent. These limits do not
+relax any of the refusals above.
+
 ### A person's stop control
 
 Press **⌃⇧⌘\** (Control–Shift–Command–backslash), choose **Stop and pause agents** in the

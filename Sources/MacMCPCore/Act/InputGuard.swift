@@ -45,6 +45,7 @@ extension Input {
         let reply = GuardReply<T>()
         let token = Untrusted.current
         let metrics = ActionMetrics.current, phase = ActionMetrics.phase
+        let background = BackgroundMode.enabled, target = BackgroundMode.target, row = BackgroundMode.row
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 reply.start(continuation)
@@ -53,7 +54,13 @@ extension Input {
                     reply.finish(Result {
                         try ActionMetrics.$current.withValue(metrics) {
                             try ActionMetrics.$phase.withValue(phase) {
-                                try Untrusted.$responseToken.withValue(token) { try work() }
+                                try Untrusted.$responseToken.withValue(token) {
+                                    try BackgroundMode.$enabled.withValue(background) {
+                                        try BackgroundMode.$target.withValue(target) {
+                                            try BackgroundMode.$row.withValue(row) { try work() }
+                                        }
+                                    }
+                                }
                             }
                         }
                     })
@@ -260,8 +267,21 @@ extension Input {
         if pid != nil, running == nil || running?.isTerminated == true {
             throw ActionError("The target app quit. Open it and take a new mac_snapshot before sending input.")
         }
+        if BackgroundMode.enabled, WindowServer.secureInputEnabled {
+            throw ActionError(BackgroundMode.refusal("send input while Secure Input is enabled; ask a person to turn it off"))
+        }
         guard keyboard else { return }
         guard let pid, pid > 0 else { throw ActionError("No target app for keyboard input. Take mac_snapshot and retry with app=.") }
+        if BackgroundMode.enabled {
+            let focused = AXElement.application(pid: pid, timeout: focusTimeout).element(kAXFocusedUIElementAttribute)
+            if let refusal = BackgroundMode.keyboardRefusal(pid: pid, elementPID: focused?.pid,
+                    windowPID: focused.flatMap { windowOwner(of: $0) }, matches: focused != nil && focused == BackgroundMode.target,
+                    secure: focused?.subrole == "AXSecureTextField", secureInput: WindowServer.secureInputEnabled) {
+                throw ActionError(refusal)
+            }
+            if let focused, let blocked = Actions.modalBlocker(of: focused, pid: pid) { throw ActionError(blocked) }
+            return
+        }
         let system = systemElement()
         let focused = system.element(kAXFocusedUIElementAttribute)
         let application = system.element(kAXFocusedApplicationAttribute)?.pid

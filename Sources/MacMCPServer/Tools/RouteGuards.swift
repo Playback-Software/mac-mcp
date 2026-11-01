@@ -39,6 +39,7 @@ enum RouteGuards {
         case let .typing(_, _, pid):
             if let r = AgentSafety.refusal(pid: pid) { return r }
         }
+        if BackgroundMode.enabled, let r = backgroundRefusal(step, policy: policy) { return r }
         switch step {
         case let .key(key, pid):
             if let r = OpenRoutes.launcherKeyRefusal([key], policy: policy, appDefines: { key in
@@ -121,6 +122,74 @@ enum RouteGuards {
             return dragFilesRefusal(source: source, destination: dest, from: from, to: to)
         }
         return nil
+    }
+
+    /// Refuse guard contexts that cannot be bound to this app without global focus or hit testing. The ordinary
+    /// route checks still run afterwards, with typing's explicit field in place of the app's focused field.
+    static func backgroundRefusal(_ step: ActionRoute.Step, policy: Policy) -> String? {
+        let pid: pid_t?
+        let element: AXElement?
+        switch step {
+        case .drag: return BackgroundMode.refusal("drag the pointer")
+        case let .target(target, point, owner, _):
+            if point != nil { return BackgroundMode.refusal("act on coordinates or screenshot pixels") }
+            pid = owner; element = target
+        case let .key(key, owner):
+            if let r = BackgroundMode.keyRefusal(key) { return r }
+            pid = owner; element = BackgroundMode.target
+        case let .text(_, owner): pid = owner; element = BackgroundMode.target
+        case let .typing(_, _, owner): pid = owner; element = BackgroundMode.target
+        }
+        guard let pid, let element, element.pid == pid else {
+            return BackgroundMode.refusal("check an unknown or remote accessibility receiver")
+        }
+        guard let running = NSRunningApplication(processIdentifier: pid), !running.isTerminated else {
+            return BackgroundMode.refusal("act on an app that is no longer running")
+        }
+        if let r = policy.refusal(bundleID: running.bundleIdentifier, name: running.localizedName) { return r }
+        if WindowServer.isSystemPrompt(pid: pid) { return "Refused: a person must answer this macOS security or permission prompt." }
+        if let r = BackgroundMode.contextRefusal(owned: BackgroundMode.owns(element, pid: pid), finder: isFinder(pid),
+                filePanel: OpenRoutes.namingPanel(of: element) != nil || backgroundHasFilePanel(pid),
+                secure: element.subrole == "AXSecureTextField") { return r }
+        if ["AXCloseButton", "AXMinimizeButton", "AXZoomButton", "AXFullScreenButton"].contains(element.subrole ?? "") {
+            return BackgroundMode.refusal("press window controls that may change window focus")
+        }
+        if let blocked = Actions.modalBlocker(of: element, pid: pid) { return blocked }
+        if element == BackgroundMode.target, let row = BackgroundMode.row,
+           let r = Actions.backgroundIdentityRefusal(element, row: row) { return r }
+        if let r = BackgroundMode.actionRefusal(kAXPressAction, role: element.role) ?? BackgroundMode.menuRefusal(element) { return r }
+        return nil
+    }
+
+    /// An inactive app may have no AXFocusedWindow. Inspect its own windows/sheets rather than infer that no
+    /// panel exists from absent focus. Unknown or oversized inventories refuse. Ordinary document contents are
+    /// not walked here; FilePanelScan handles the candidate dialogs, sheets and panel windows.
+    static func backgroundHasFilePanel(_ pid: pid_t) -> Bool {
+        let read = AXElement.application(pid: pid).elements(reporting: kAXWindowsAttribute)
+        return backgroundHasFilePanel(windows: read.error == nil ? read.elements : nil,
+                                      panel: { OpenRoutes.namingPanel(of: $0) != nil }) { window in
+            guard let values = window.read(reporting: [kAXRoleAttribute, kAXSubroleAttribute, "AXSheets", kAXChildrenAttribute]),
+                  values.failed.isEmpty, values.values[kAXRoleAttribute] != nil else { return nil }
+            let sheets = (values.values["AXSheets"] as? [AXUIElement] ?? []).map(AXElement.init)
+            let children = (values.values[kAXChildrenAttribute] as? [AXUIElement] ?? []).map(AXElement.init)
+            guard sheets.count + children.count <= 128 else { return nil }
+            var candidates: [AXElement] = []
+            for child in sheets + children {
+                guard let role = child.role else { return nil }
+                if role == "AXSheet" || role == kAXWindowRole { candidates.append(child) }
+            }
+            return candidates
+        }
+    }
+
+    static func backgroundHasFilePanel<Node>(windows: [Node]?, panel: (Node) -> Bool, children: (Node) -> [Node]?) -> Bool {
+        guard let windows, windows.count <= 64 else { return true }
+        for window in windows {
+            if panel(window) { return true }
+            guard let children = children(window), children.count <= 128 else { return true }
+            if children.contains(where: panel) { return true }
+        }
+        return false
     }
 
     /// What a drag carries and where it lands, read at the check before its button goes down. Once a drag is under
@@ -215,7 +284,8 @@ enum RouteGuards {
     }
 
     static func focusedField(_ pid: pid_t) -> AXElement? {
-        AXElement.application(pid: pid).element(kAXFocusedUIElementAttribute)
+        BackgroundMode.enabled ? BackgroundMode.target ?? AXElement.application(pid: pid).element(kAXFocusedUIElementAttribute)
+            : AXElement.application(pid: pid).element(kAXFocusedUIElementAttribute)
     }
 
     /// Finder (its Open With chooser included), a file panel, or an open menu: where keys act on a selection.
