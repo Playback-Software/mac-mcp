@@ -21,6 +21,9 @@ import Testing
         }
         func read(_ relative: String) -> String? { FileManager.default.contents(atPath: path(relative)).map { String(decoding: $0, as: UTF8.self) } }
         func files(in relative: String) -> [String] { ((try? FileManager.default.contentsOfDirectory(atPath: path(relative))) ?? []).sorted() }
+        static let backupFolder = "Library/Application Support/MacMCP/client-backups"
+        /// What `mac-mcp` has put in its backup folder.
+        var backups: [String] { files(in: Home.backupFolder) }
     }
 
     let local = ServerEntry(command: "/opt/mac/bin/mac-mcp")
@@ -53,8 +56,8 @@ import Testing
     }
 
     @Test func serverNamesAreChecked() throws {
-        for good in ["mac", "mac-2", "Mac_mini", "-x"] { try ClientConfig.validate(name: good) }
-        for bad in ["", "a b", "a.b", "a\"b", "é", String(repeating: "a", count: 65), "a/b", "a\nb"] {
+        for good in ["mac", "mac-2", "Mac_mini", "a.b", "v1.2-x", String(repeating: "a", count: 64)] { try ClientConfig.validate(name: good) }
+        for bad in ["", "-x", "--help", "--name", "a b", ".", "..", "a\"b", "é", String(repeating: "a", count: 65), "a/b", "a\nb", "a;b"] {
             #expect(throws: ClientConfigError.self, "\(bad)") { try ClientConfig.validate(name: bad) }
         }
     }
@@ -91,9 +94,10 @@ import Testing
             #expect(text != original)
             #expect(try ClientConfig.registered(client, name: "mac", in: Data(text.utf8)) == local, "\(client)")
             let dir = (file as NSString).deletingLastPathComponent
-            let backups = home.files(in: dir).filter { $0.contains(".macmcp-backup-") }
-            #expect(backups.count == 1, "\(client)")
-            #expect(home.read(dir + "/" + backups[0]) == original)
+            #expect(home.files(in: dir).allSatisfy { !$0.contains("backup") }, "no backup beside the original: \(client)")
+            #expect(home.backups.count == 1, "\(client)")
+            #expect(home.backups.first?.hasPrefix(client.rawValue + "-") == true)
+            #expect(home.read(Home.backupFolder + "/" + home.backups[0]) == original)
             #expect(added.lines.contains { $0.contains("Backup of the original") })
             #expect(added.lines.contains { $0.contains("~/") && $0.contains("added") })
             #expect(!added.lines.contains { $0.contains(home.root) })
@@ -128,7 +132,7 @@ import Testing
         #expect(try ClientConfig.registered(.cursor, name: "mac", in: Data(home.read(".cursor/mcp.json")!.utf8)) == local)
         let again = try ClientInstaller.run(request(.cursor, home), runCommand: none)
         #expect(again.change == .unchanged)
-        #expect(home.files(in: ".cursor").filter { $0.contains("backup") }.count == 1)
+        #expect(home.backups.count == 1)
     }
 
     @Test func aDifferentNameLeavesTheDefaultEntryAlone() throws {
@@ -220,10 +224,10 @@ import Testing
         #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
         #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: home.path(".claude.json"))) == home.path("dotfiles/claude.json"))
         #expect(home.read("dotfiles/claude.json")?.contains("\"mac\"") == true)
-        let backup = try #require(home.files(in: "dotfiles").first { $0.contains("backup") })
-        let backupAttributes = try FileManager.default.attributesOfItem(atPath: home.path("dotfiles/" + backup))
+        #expect(home.files(in: "dotfiles") == ["claude.json"])
+        let backup = try #require(home.backups.first)
+        let backupAttributes = try FileManager.default.attributesOfItem(atPath: home.path(Home.backupFolder + "/" + backup))
         #expect((backupAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o600)
-        #expect(!home.files(in: "dotfiles").contains { $0.hasSuffix(".tmp") })
     }
 
     @Test func refusesToWriteOverAFileThatChangedAfterItWasRead() throws {
@@ -242,7 +246,7 @@ import Testing
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let first = try #require(try ClientConfig.apply(try ClientConfig.plan(.cursor, name: "a", entry: local, environment: home.environment), now: now))
         let second = try #require(try ClientConfig.apply(try ClientConfig.plan(.cursor, name: "b", entry: local, environment: home.environment), now: now))
-        #expect(first != second && first.contains(".macmcp-backup-"))
+        #expect(first != second && first.contains("/client-backups/cursor-"))
         #expect(FileManager.default.contents(atPath: first) == Data("{}\n".utf8))
     }
 
@@ -290,12 +294,16 @@ import Testing
         try withClaude(home) { env in
             let calls = Calls()
             let remote = try ServerEntry.remote("me@host")
+            try home.write(".claude.json", "{\"mcpServers\": {\"work\": {\"type\": \"stdio\", \"command\": \"old\", \"args\": [], \"env\": {\"K\": \"v\"}}}}")
             let r = try ClientInstaller.run(.init(client: .claudeCode, name: "work", entry: remote, environment: env), runCommand: { _, args in
                 calls.add(args)
                 return calls.all.count == 1 ? (1, "MCP server work already exists in user config") : (0, "ok")
             })
             #expect(calls.all.map { Array($0.prefix(2)) } == [["mcp", "add"], ["mcp", "remove"], ["mcp", "add"]])
-            #expect(calls.all[1] == ["mcp", "remove", "--scope", "user", "work"])
+            #expect(calls.all[1] == ["mcp", "remove", "--scope", "user", "--", "work"])
+            let saved = try #require(home.backups.first)
+            #expect(saved.hasPrefix("claude-code-") && saved.hasSuffix("server-work.json"))
+            #expect(home.read(Home.backupFolder + "/" + saved) == "{\"args\":[],\"command\":\"old\",\"env\":{\"K\":\"v\"},\"type\":\"stdio\"}")
             #expect(calls.all[2] == ["mcp", "add", "--scope", "user", "work", "--", "ssh", "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3", "me@host", "~/.local/bin/mac-mcp"])
             #expect(r.change == .replaced)
         }
@@ -309,6 +317,7 @@ import Testing
                 Issue.record("should have failed")
             } catch { #expect("\(error)".contains("boom")) }
             let calls = Calls()
+            try home.write(".claude.json", "{\"mcpServers\": {\"mac\": {\"command\": \"old\"}}}")
             do {
                 _ = try ClientInstaller.run(.init(client: .claudeCode, name: "mac", entry: local, environment: env), runCommand: { _, args in
                     calls.add(args)
@@ -326,14 +335,14 @@ import Testing
             let calls = Calls()
             let removed = try ClientInstaller.run(.init(client: .claudeCode, name: "mac", entry: nil, environment: env),
                                                   runCommand: { _, args in calls.add(args); return (0, "Removed MCP server mac") })
-            #expect(calls.all == [["mcp", "remove", "--scope", "user", "mac"]] && removed.change == .removed)
+            #expect(calls.all == [["mcp", "remove", "--scope", "user", "--", "mac"]] && removed.change == .removed)
             let missing = try ClientInstaller.run(.init(client: .claudeCode, name: "mac", entry: nil, environment: env),
                                                   runCommand: { _, _ in (1, "No MCP server found with name: mac") })
             #expect(missing.change == .unchanged)
             let dry = try ClientInstaller.run(.init(client: .claudeCode, name: "mac", entry: local, dryRun: true, environment: env), runCommand: none)
             #expect(dry.lines.joined().contains("would run `claude mcp add --scope user mac -- /opt/mac/bin/mac-mcp`"))
             let dryRemove = try ClientInstaller.run(.init(client: .claudeCode, name: "mac", entry: nil, dryRun: true, environment: env), runCommand: none)
-            #expect(dryRemove.lines.joined().contains("would run `claude mcp remove --scope user mac`"))
+            #expect(dryRemove.lines.joined().contains("would run `claude mcp remove --scope user -- mac`"))
         }
     }
 
@@ -347,7 +356,7 @@ import Testing
         let json = try #require(try JSONSerialization.jsonObject(with: Data(home.read(".claude.json")!.utf8)) as? [String: Any])
         let entry = (json["mcpServers"] as? [String: Any])?["mac"] as? [String: Any]
         #expect(entry?["type"] as? String == "stdio" && entry?["command"] as? String == "/opt/mac/bin/mac-mcp")
-        #expect(r.lines.contains { $0.contains("Quit Claude Code") })
+        #expect(r.lines.allSatisfy { !$0.contains(home.root) })
     }
 
     // MARK: helpers

@@ -365,7 +365,8 @@ and, with the same rules:
   VS Code Insiders and Cursor in `~/Library/Application Support` (MCP servers, tasks, and settings such as terminal
   profiles). An agent that could edit its
   own client's MCP servers would be outside this policy. (`mac-mcp install --client`, which a person runs in Terminal, edits
-  these files itself; it never goes through the agent, and agents still can't touch them);
+  these files itself; it never goes through the agent, and agents still can't touch them. Its backups of them go to
+  `~/Library/Application Support/MacMCP/client-backups/`, inside the protected support folder, not beside the config);
 - the Services cache `pbs` keeps, `~/Library/Caches/com.apple.nsservicescache.plist`: MacMCP refuses the key
   equivalents it lists (see Services below), and a rewritten one could drop them.
 

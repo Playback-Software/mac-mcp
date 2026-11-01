@@ -22,14 +22,14 @@ enum TOMLConfigEditor {
             if let last = out.last, last != 0x0A { out += Array(newline.utf8) }
             if !out.isEmpty, !endsWithBlankLine(out) { out += Array(newline.utf8) }
             out += Array(table.utf8)
-            return (Data(out), .added)
+            return (try validated(out), .added)
         }
         let current = String(decoding: source[first.start..<first.contentEnd], as: UTF8.self)
         if sections.count == 1, current == table || current == table.trimmingCharacters(in: .newlines) { return (Data(source), .unchanged) }
         var out = source
         for extra in sections.dropFirst().reversed() { out.removeSubrange(removalRange(extra, in: source)) }
         out.replaceSubrange(first.start..<first.contentEnd, with: Array(table.utf8))
-        return (Data(out), .replaced)
+        return (try validated(out), .replaced)
     }
 
     static func remove(_ data: Data?, name: String) throws -> (data: Data, outcome: JSONConfigEditor.Outcome) {
@@ -39,7 +39,13 @@ enum TOMLConfigEditor {
         guard !sections.isEmpty else { return (Data(source), .unchanged) }
         var out = source
         for section in sections.reversed() { out.removeSubrange(removalRange(section, in: source)) }
-        return (Data(out), .removed)
+        return (try validated(out), .removed)
+    }
+
+    /// Whether the file has a `[mcp_servers.<name>]` table at all, whatever it holds.
+    static func contains(_ data: Data, name: String) throws -> Bool {
+        let document = try TOMLScanner(try text(data)).parse()
+        return !(try locate(document, name: name)).isEmpty
     }
 
     /// The command and args of the entry, or nil when absent. For checking what a write produced.
@@ -85,9 +91,14 @@ enum TOMLConfigEditor {
     }
 
     static func render(name: String, command: String, args: [String], newline: String) -> String {
-        "[\(root).\(name)]" + newline
+        "[\(root).\(key(name))]" + newline
             + "command = \(quote(command))" + newline
             + "args = [" + args.map(quote).joined(separator: ", ") + "]" + newline
+    }
+
+    /// A table-name part as a key: bare when it can be, quoted when it holds a dot, which a bare key can't.
+    static func key(_ name: String) -> String {
+        name.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil ? name : quote(name)
     }
 
     static func quote(_ s: String) -> String {
@@ -137,6 +148,14 @@ enum TOMLConfigEditor {
         return i < 0 || bytes[i] == 0x0A
     }
 
+    /// The edited file, checked the way the original was: an edit that would leave invalid TOML is never returned.
+    private static func validated(_ bytes: [UInt8]) throws -> Data {
+        do { _ = try TOMLScanner(bytes).parse() } catch let error as ConfigFormatError {
+            throw ConfigFormatError(description: "the edited file would not be valid TOML (\(error.description))")
+        }
+        return Data(bytes)
+    }
+
     private static func text(_ data: Data?) throws -> [UInt8] {
         guard let data else { return [] }
         guard String(data: data, encoding: .utf8) != nil else { throw ConfigFormatError(description: "not valid UTF-8") }
@@ -171,12 +190,42 @@ struct TOMLDocument {
     var assignments: [Assignment] = []
 }
 
-/// A TOML 1.0 syntax checker that reports where tables start and end. It checks that the file's syntax is valid; it
-/// doesn't check every rule about redefining keys. (It accepts newlines and trailing commas in inline tables, which
-/// TOML 1.1 allows.)
+/// The keys and tables a document defines so far, to refuse what TOML says is defined twice.
+private final class TOMLNode {
+    enum Kind { case table, arrayOfTables, value }
+    /// How a table came to exist: a `[header]`, the path of a deeper header (it can still be defined by its own
+    /// header), dotted keys (a header can't define it) or an inline table (closed for good).
+    enum Origin { case header, implicit, dotted, inline }
+
+    var kind: Kind
+    var origin: Origin
+    var children: [String: TOMLNode] = [:]
+    /// Arrays of tables: the elements, the last of which later headers extend.
+    var elements: [TOMLNode] = []
+
+    init(_ kind: Kind, _ origin: Origin = .header) {
+        self.kind = kind
+        self.origin = origin
+    }
+
+    /// The table that a path through this node leads into: the node itself, or an array of tables' last element.
+    var scope: TOMLNode? {
+        switch kind {
+        case .table: return self
+        case .arrayOfTables: return elements.last
+        case .value: return nil
+        }
+    }
+}
+
+/// A TOML 1.0 checker that reports where tables start and end. It refuses invalid syntax, invalid dates and times,
+/// duplicate keys, duplicate `[table]` headers and keys and tables that redefine each other. (It accepts newlines and
+/// trailing commas in inline tables, which TOML 1.1 allows.)
 struct TOMLScanner {
     let b: [UInt8]
     var i = 0
+    private var root = TOMLNode(.table, .header)
+    private var current: TOMLNode!
 
     init(_ bytes: [UInt8]) { b = bytes }
 
@@ -197,6 +246,7 @@ struct TOMLScanner {
     private mutating func run() throws -> TOMLDocument {
         var document = TOMLDocument()
         var scope: [String] = []
+        current = root
         if b.starts(with: [0xEF, 0xBB, 0xBF]) { i = 3 }
         while i < b.count {
             let lineStart = i
@@ -210,6 +260,7 @@ struct TOMLScanner {
                 let isArray = i + 1 < b.count && b[i + 1] == UInt8(ascii: "[")
                 i += isArray ? 2 : 1
                 skipBlanks()
+                let keyStart = i
                 let path = try parseKey()
                 skipBlanks()
                 for _ in 0..<(isArray ? 2 : 1) {
@@ -217,9 +268,11 @@ struct TOMLScanner {
                     i += 1
                 }
                 try endOfLine()
+                current = try define(header: path, isArray: isArray, at: keyStart)
                 scope = path
                 document.sections.append(.init(path: path, isArray: isArray, start: lineStart, contentEnd: i))
             default:
+                let keyStart = i
                 let key = try parseKey()
                 skipBlanks()
                 guard i < b.count, b[i] == UInt8(ascii: "=") else { throw fail("expected \"=\" after the key") }
@@ -227,11 +280,73 @@ struct TOMLScanner {
                 skipBlanks()
                 let value = try parseValue(depth: 0)
                 try endOfLine()
+                try define(key: key, in: current, as: TOMLNode(.value), at: keyStart)
                 document.assignments.append(.init(scope: scope, key: key, value: value))
                 if !document.sections.isEmpty { document.sections[document.sections.count - 1].contentEnd = i }
             }
         }
         return document
+    }
+
+    // MARK: what is defined
+
+    private func described(_ path: [String]) -> String { path.joined(separator: ".") }
+
+    /// Registers a `[header]` or `[[header]]` and returns the table that keys now go into.
+    private func define(header path: [String], isArray: Bool, at offset: Int) throws -> TOMLNode {
+        var node = root
+        for key in path.dropLast() {
+            if let child = node.children[key] {
+                guard let next = child.scope else { throw fail("`\(described(path))` goes through `\(key)`, which is a value, not a table", at: offset) }
+                node = next
+            } else {
+                let child = TOMLNode(.table, .implicit)
+                node.children[key] = child
+                node = child
+            }
+        }
+        let last = path[path.count - 1]
+        if isArray {
+            if let existing = node.children[last] {
+                guard existing.kind == .arrayOfTables else { throw fail("`[[\(described(path))]]` redefines `\(last)`, which is already defined", at: offset) }
+                let element = TOMLNode(.table)
+                existing.elements.append(element)
+                return element
+            }
+            let array = TOMLNode(.arrayOfTables)
+            let element = TOMLNode(.table)
+            array.elements = [element]
+            node.children[last] = array
+            return element
+        }
+        if let existing = node.children[last] {
+            guard existing.kind == .table, existing.origin == .implicit else {
+                throw fail("`[\(described(path))]` is defined more than once, or redefines a key", at: offset)
+            }
+            existing.origin = .header
+            return existing
+        }
+        let table = TOMLNode(.table)
+        node.children[last] = table
+        return table
+    }
+
+    /// Registers `key = value` (a dotted key defines the tables on its way) in `table`.
+    private func define(key: [String], in table: TOMLNode, as value: TOMLNode, at offset: Int) throws {
+        var node = table
+        for part in key.dropLast() {
+            if let child = node.children[part] {
+                guard child.kind == .table, child.origin == .dotted else { throw fail("`\(described(key))` redefines `\(part)`, which is already defined", at: offset) }
+                node = child
+            } else {
+                let child = TOMLNode(.table, .dotted)
+                node.children[part] = child
+                node = child
+            }
+        }
+        let last = key[key.count - 1]
+        guard node.children[last] == nil else { throw fail("duplicate key `\(described(key))`", at: offset) }
+        node.children[last] = value
     }
 
     private mutating func skipBlanks() {
@@ -311,16 +426,19 @@ struct TOMLScanner {
             return onlyStrings ? .strings(strings) : .other
         case UInt8(ascii: "{"):
             i += 1
+            let table = TOMLNode(.table, .inline)
             while true {
                 try skipSpace()
                 guard i < b.count else { throw fail("the inline table is never closed") }
                 if b[i] == UInt8(ascii: "}") { i += 1; break }
-                _ = try parseKey()
+                let keyStart = i
+                let key = try parseKey()
                 skipBlanks()
                 guard i < b.count, b[i] == UInt8(ascii: "=") else { throw fail("expected \"=\" after the key") }
                 i += 1
                 skipBlanks()
                 _ = try parseValue(depth: depth + 1)
+                try define(key: key, in: table, as: TOMLNode(.value), at: keyStart)
                 try skipSpace()
                 guard i < b.count else { throw fail("the inline table is never closed") }
                 if b[i] == UInt8(ascii: ",") { i += 1; continue }
@@ -455,8 +573,37 @@ struct TOMLScanner {
         }
         let token = String(decoding: b[start..<i], as: UTF8.self)
         let whole = NSRange(token.startIndex..., in: token)
-        guard !token.isEmpty, Self.patterns.contains(where: { $0.firstMatch(in: token, range: whole) != nil }) else {
+        guard !token.isEmpty, let match = Self.patterns.firstIndex(where: { $0.firstMatch(in: token, range: whole) != nil }) else {
             throw fail("invalid value", at: start)
         }
+        if match >= Self.temporalPatterns, !Self.isValidDateOrTime(Array(token.utf8)) { throw fail("invalid date or time", at: start) }
+    }
+
+    /// Patterns from this index on match dates and times, which need their numbers checked as well.
+    private static let temporalPatterns = 7
+
+    /// Month and day for the year, hour below 24, minute below 60, second up to 60 (a leap second), offset below 24:60.
+    private static func isValidDateOrTime(_ u: [UInt8]) -> Bool {
+        func number(_ range: Range<Int>) -> Int { u[range].reduce(0) { $0 * 10 + Int($1) - 48 } }
+        var index = 0
+        if u.count >= 10, u[4] == UInt8(ascii: "-") {
+            let year = number(0..<4), month = number(5..<7), day = number(8..<10)
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+            let lengths = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+            guard (1...12).contains(month), day >= 1, day <= lengths[month - 1] else { return false }
+            if u.count == 10 { return true }
+            index = 11
+        }
+        guard u.count >= index + 5, number(index..<(index + 2)) < 24, number((index + 3)..<(index + 5)) < 60 else { return false }
+        var j = index + 5
+        if j < u.count, u[j] == UInt8(ascii: ":") {
+            guard j + 3 <= u.count, number((j + 1)..<(j + 3)) <= 60 else { return false }
+            j += 3
+            if j < u.count, u[j] == UInt8(ascii: ".") { j += 1; while j < u.count, u[j] >= 0x30, u[j] <= 0x39 { j += 1 } }
+        }
+        if j < u.count, u[j] == UInt8(ascii: "+") || u[j] == UInt8(ascii: "-") {
+            guard j + 6 <= u.count, number((j + 1)..<(j + 3)) < 24, number((j + 4)..<(j + 6)) < 60 else { return false }
+        }
+        return true
     }
 }

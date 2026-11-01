@@ -597,8 +597,9 @@ let runProgram: ClientInstaller.CommandRunner = { executable, arguments in
 /// Adds MacMCP to one client's config (`entry` nil removes it) and says what happened. False if it failed.
 func registerClient(_ client: McpClient, name: String = "mac", entry: ServerEntry?, dryRun: Bool = false, create: Bool = false) -> Bool {
     do {
+        if !dryRun { say("note: " + ClientInstaller.quitAdvice(for: client)) }
         let report = try ClientInstaller.run(.init(client: client, name: name, entry: entry, dryRun: dryRun, createFolder: create),
-                                             runCommand: runProgram)
+                                             runCommand: runProgram, notify: { say($0) })
         for line in report.lines { say(line) }
         return true
     } catch {
