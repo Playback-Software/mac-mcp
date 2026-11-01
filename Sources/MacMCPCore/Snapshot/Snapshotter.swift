@@ -51,6 +51,13 @@ public struct SnapshotResult: Sendable {
     public var shownRows: [Row] = []
     public var shownRefs: [String] { shownRows.compactMap(\.ref) }
 
+    /// A header must not introduce a ref whose label the response doesn't show (diffs and waits show subsets).
+    public func headerLines(showing rows: [Row]) -> [String] {
+        let header = Array(lines.prefix(2))
+        guard let focusRef, !rows.contains(where: { $0.ref == focusRef }) else { return header }
+        return header.map { $0.replacingOccurrences(of: " · focus: \(focusRef) ·", with: " · focus: (not listed) ·") }
+    }
+
     /// The snapshot as the agent reads it: the marked block, then the notes.
     public var text: String {
         ([Untrusted.wrap(lines: lines)] + notes.map { "… " + $0 }).joined(separator: "\n")
@@ -175,17 +182,10 @@ public enum Snapshotter {
         let snapshot = try await refs.record(&rows, pid: app.pid)
 
         let focused = appElement.element(kAXFocusedUIElementAttribute)
-        let focusRef = focused.flatMap { f in rows.first { $0.element == f }?.ref }
-
-        let rendered: Snapshot.Rendering
-        if req.query?.isEmpty == false {
-            let (text, omitted) = Snapshot.render(rows, frames: req.frames, maxTokens: req.maxTokens)
-            rendered = Snapshot.Rendering(text: text, omitted: omitted, shownRows: Array(rows.prefix(rows.count - omitted)))
-        } else {
-            rendered = Snapshot.renderOverview(rows, frames: req.frames, maxTokens: req.maxTokens, focusRef: focusRef)
-        }
+        let focusedRef = focused.flatMap { f in rows.first { $0.element == f }?.ref }
+        let rendered = await render(rows, request: req, focusRef: focusedRef, refs: refs)
         let body = rendered.text, omitted = rendered.omitted, shownRows = rendered.shownRows
-        if req.markShown { await refs.markShown(shownRows) }
+        let focusRef = focusedRef.flatMap { ref in shownRows.contains(where: { $0.ref == ref }) ? ref : nil }
         var notes: [String] = []
         let interactive = rows.filter { $0.kind == .interactive }.count
         // With no Finder windows open, Finder's "window" is the desktop: full-screen, untitled, nearly empty.
@@ -218,6 +218,20 @@ public enum Snapshotter {
         ] + (body.isEmpty ? ["(no elements)"] : body.components(separatedBy: "\n"))
         return SnapshotResult(snapshot: snapshot, app: app, windowTitle: windowTitle, focusRef: focusRef,
                               blockers: blockers, rows: rows, lines: lines, notes: notes, stats: stats, shownRows: shownRows)
+    }
+
+    /// Shared by live snapshots and unit fixtures; bookkeeping requests leave every unreturned ref unshown.
+    static func render(_ rows: [Row], request req: SnapshotRequest, focusRef: String? = nil,
+                       refs: RefStore = .shared) async -> Snapshot.Rendering {
+        let rendered: Snapshot.Rendering
+        if req.query?.isEmpty == false {
+            let (text, omitted) = Snapshot.render(rows, frames: req.frames, maxTokens: req.maxTokens)
+            rendered = Snapshot.Rendering(text: text, omitted: omitted, shownRows: Array(rows.prefix(rows.count - omitted)))
+        } else {
+            rendered = Snapshot.renderOverview(rows, frames: req.frames, maxTokens: req.maxTokens, focusRef: focusRef)
+        }
+        if req.markShown { await refs.markShown(rendered.shownRows) }
+        return rendered
     }
 
     /// What the walk itself leaves out, for the notes after the marked block: rows cut by the token budget, offscreen

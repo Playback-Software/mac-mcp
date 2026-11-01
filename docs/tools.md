@@ -34,9 +34,13 @@ a label, value or child list failed to read, cannot prove a target disappeared (
 doesn't hold it up).
 
 `mac_snapshot` defaults to a 1500-token row budget (`max_tokens`). When an overview exceeds it, static text and
-headings yield to controls. Within each kind, the focused element and nearby rows, then the top and bottom rows,
+headings yield to controls. Within each kind, focus, selection, nearby rows, then the top and bottom rows,
 get priority; output stays in tree order. Repeated table/list rows with the same role and shape show the first few,
-the last, and rows around focus, with `… N more rows like this (use query= or scroll)` for collapsed runs. The final
+the last, rows around focus, and selected items, with `… N more rows like this (use query= or scroll)` for collapsed
+runs. Runs never cross structural parents, including unnamed lists. For many selected items, the first and last few
+get priority and summaries count hidden selected items (`… N more rows like this (M selected; use query= or scroll)`).
+Named containers stay with their displayed controls, and each other gap has a costed `… N rows not shown` marker.
+Summary counts reflect what actually fits; a run with no displayed examples gets a summary when space allows. The final
 note counts all unshown rows, including collapsed rows and their controls. Use `query=` or a narrower `scope=` to
 find them, or raise `max_tokens`; for offscreen elements, scroll or use `offscreen=true`. Query results retain their
 matching order and prefix budget, without repetition folding. Unshown controls keep their refs across snapshots,
@@ -48,7 +52,11 @@ They support appearance checks only, since recognition errors cannot reliably pr
 recognizer load may exceed a short timeout; the error explains how to retry. Accessibility wait timeouts include
 the current window state and a suggested recovery path.
 
-Refs stay meaningful. Before acting on a ref, the action re-reads its element and refuses if the label (or developer
+Refs stay meaningful. A ref that has never appeared in tool output is refused:
+`eX was never shown; find it with mac_snapshot query= or take a new snapshot.` Do not guess refs hidden by folding
+or the budget. Snapshot rows, query results, action reports/diffs and returned `mac_wait` matches or timeout state
+count as shown; a focus header only names a ref when its row is also returned. Window lists use window indices,
+not element refs. Before acting on a shown ref, the action re-reads its element and refuses if the label (or developer
 identifier) differs from what the last snapshot, diff or `mac_wait` result showed you (`e10 was "Item 1" but now
 reads "Item 7"`), as happens when a virtualised or re-sorted list reuses a row object. Snapshots a tool takes for
 itself (an action's before/after, a drag's drop target, `mac_wait`'s polling) never count as having shown you

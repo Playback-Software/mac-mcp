@@ -627,7 +627,7 @@ private func mint(_ counter: inout IDCounter) async throws -> String {
         let full = Diff.compute(before: before, after: after)
         #expect(full.lines == ["~ e2 button \"Renamed\": label \"Same\" → \"Renamed\"", "+ e3 button \"New\"",
                                "- e1 button \"Old\"", "+ text \"New text\"", "- text \"Gone text\""])
-        #expect(full.refs == ["e2", "e3"])
+        #expect(full.refs == ["e2", "e3", "e1"])
         let partial = Diff.compute(before: before, after: after, showDisappeared: false)
         #expect(partial.lines == ["~ e2 button \"Renamed\": label \"Same\" → \"Renamed\"", "+ e3 button \"New\"", "+ text \"New text\""])
         #expect(partial.refs == ["e2", "e3"])
@@ -638,6 +638,8 @@ private func mint(_ counter: inout IDCounter) async throws -> String {
         let after = (0..<40).map { row("e\($0)", "button", "B\($0)") }
         let r = Diff.compute(before: [], after: after, maxLines: 10)
         #expect(r.lines.count == 11 && r.refs.count == 10 && r.refs.last == "e9")
+        let gone = Diff.compute(before: after, after: [], maxLines: 10)
+        #expect(gone.lines.count == 11 && gone.refs == r.refs)
     }
 }
 

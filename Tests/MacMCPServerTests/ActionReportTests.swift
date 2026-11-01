@@ -35,7 +35,7 @@ import Testing
         #expect(out.text.contains("\n- e1 button \"Old\""))
         #expect(out.text.contains("\n+ e3 button \"New\""))
         #expect(!out.text.contains("incomplete"))
-        #expect(out.shownRows.map(\.ref) == ["e3"], "only refs whose line the agent sees count as shown")
+        #expect(out.shownRows.map(\.ref) == ["e3", "e1"], "disappearance lines also expose refs and labels")
     }
 
     @Test func aTruncatedWalkSuppressesDisappearedRowsAndSaysSo() {

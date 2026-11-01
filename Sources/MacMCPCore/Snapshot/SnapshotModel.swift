@@ -19,6 +19,7 @@ public struct RawNode: Sendable {
     public var expanded: Bool?
     /// Index path from the snapshot root ("0.3.1"); part of the ref fingerprint.
     public var path: String = ""
+    var parentPath: String { path.components(separatedBy: ".").dropLast().joined(separator: ".") }
     /// The title was borrowed from the text element beside it (`Snapshot.associateLabels`): the element itself is unnamed.
     public var labelFromNeighbor = false
     /// The walk couldn't vouch for this node's label and identifier: one of its label sources (title, description,
@@ -94,6 +95,8 @@ public struct Row: Sendable, Equatable {
     public var ref: String?
     /// Identity inputs for ref matching (not printed).
     public var fingerprint: String
+    /// Structural parent in the walked tree, including unnamed containers omitted from the rendered rows.
+    public var parentPath: String = ""
     /// The live element behind an interactive row (not printed).
     public var element: AXElement? = nil
     /// Window, sheet or menu bar that owns this control; fingerprint matching never crosses this boundary.
@@ -345,7 +348,7 @@ public enum Snapshot {
                 let label = label(n)
                 rows.append(Row(kind: .interactive, role: shortRole(n.role, subrole: n.subrole), label: label,
                                 value: displayValue(n), states: states(n), frame: n.frame, depth: depth, ref: nil,
-                                fingerprint: fingerprint(n, pid: pid, label: label), element: n.element,
+                                fingerprint: fingerprint(n, pid: pid, label: label), parentPath: n.parentPath, element: n.element,
                                 refScope: refScope, searchText: searchable(n), identifier: n.identifier, labelFromNeighbor: n.labelFromNeighbor,
                                 identityUncertain: n.identityUncertain))
                 // Rows and links summarize their text; still surface interactive descendants (buttons in a row),
@@ -358,7 +361,8 @@ public enum Snapshot {
                                                   : (clean(n.value) ?? clean(n.title) ?? clean(n.description))
                 if let text {
                     rows.append(Row(kind: .text, role: n.role == "AXHeading" ? "heading" : "text", label: truncate(text, 200),
-                                    value: nil, states: [], frame: n.frame, depth: depth, ref: nil, fingerprint: "", searchText: text))
+                                    value: nil, states: [], frame: n.frame, depth: depth, ref: nil, fingerprint: "",
+                                    parentPath: n.parentPath, searchText: text))
                 }
                 if n.role == "AXHeading" { return }   // its text children are already in the heading
             }
@@ -366,7 +370,7 @@ public enum Snapshot {
             if contextRoles.contains(n.role), !isRoot || n.role == "AXSheet",
                let name = clean(n.title) ?? (n.role == "AXGroup" || n.role == "AXToolbar" ? nil : clean(n.description)) {
                 rows.append(Row(kind: .context, role: shortRole(n.role, subrole: n.subrole), label: truncate(name, 100),
-                                value: nil, states: [], frame: n.frame, depth: depth, ref: nil, fingerprint: ""))
+                                value: nil, states: [], frame: n.frame, depth: depth, ref: nil, fingerprint: "", parentPath: n.parentPath))
                 childDepth += 1
             }
             push(n.children) { .visit($0, depth: childDepth, isRoot: false, inheritedScope: refScope) }
@@ -379,7 +383,7 @@ public enum Snapshot {
                 let label = label(n)
                 rows.append(Row(kind: .interactive, role: shortRole(n.role, subrole: n.subrole), label: label,
                                 value: displayValue(n), states: states(n), frame: n.frame, depth: depth, ref: nil,
-                                fingerprint: fingerprint(n, pid: pid, label: label), element: n.element,
+                                fingerprint: fingerprint(n, pid: pid, label: label), parentPath: n.parentPath, element: n.element,
                                 refScope: refScope, searchText: searchable(n), identifier: n.identifier, labelFromNeighbor: n.labelFromNeighbor,
                                 identityUncertain: n.identityUncertain))
             }

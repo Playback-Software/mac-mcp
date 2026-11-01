@@ -5,7 +5,7 @@ import Foundation
 public enum Diff {
     public struct Result: Sendable, Equatable {
         public var lines: [String]
-        /// Refs that appear in `lines` (so the agent has now seen their current label).
+        /// Refs that appear in `lines`, including disappearance lines whose labels come from the before-snapshot.
         public var refs: [String]
     }
 
@@ -36,6 +36,7 @@ public enum Diff {
         if showDisappeared {
             for r in before where r.ref != nil && !afterRefs.contains(r.ref!) {
                 out.append("- \(r.ref!) \(r.role) \"\(r.label)\"")
+                refs.append(r.ref!)
             }
         }
 
