@@ -173,6 +173,7 @@ enum WaitTool {
 
     static func waitForOCR(app: AppInfo, query: String, timeout: TimeInterval) async -> ToolOutput {
         let started = Date()
+        let memo = OCR.Memo()   // an unchanged window isn't recognized again
         var last = "No OCR sample completed. The recognizer's first load can take about a minute; retry after it warms up."
         do {
             while Date().timeIntervalSince(started) < timeout {
@@ -186,7 +187,7 @@ enum WaitTool {
                     request.maxEdge = 2560
                     let shot = try await Capture.take(request)
                     try Task.checkCancellation()
-                    return (shot, try await OCR.recognize(png: shot.png))
+                    return (shot, try await OCR.recognize(image: shot.image, memo: memo))
                 }) else { break }
                 try Task.checkCancellation()
                 let (shot, lines) = sample

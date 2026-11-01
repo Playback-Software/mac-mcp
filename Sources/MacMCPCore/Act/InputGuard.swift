@@ -7,6 +7,9 @@ extension Input {
     public static let routeTimeout: TimeInterval = 2
     static let focusTimeout: Float = 0.08
     @TaskLocal static var guardWindows: [WindowInfo]?
+    /// Pools that stand in for the shared ones, by name, for the current task and what it starts. Only tests set it,
+    /// so one that stalls workers on purpose can't exhaust the shared pools for the tests running beside it.
+    @TaskLocal static var guardPoolOverrides: [String: GuardPool] = [:]
 
     /// Where a guard runs. Route checks resolve paths (lstat, aliases, hard links), and on an unresponsive network
     /// mount those block in the kernel indefinitely; they get their own workers so they can't starve the focus and
@@ -38,6 +41,7 @@ extension Input {
     /// Guards only read state. A late IPC reply may finish, but can never post input or delay drag cleanup.
     public static func guardWork<T: Sendable>(pool: GuardPool = .focus, timeout: TimeInterval = guardTimeout,
                                             _ work: @escaping @Sendable () throws -> T) async throws -> T {
+        let pool = guardPoolOverrides[pool.name] ?? pool
         let reply = GuardReply<T>()
         let token = Untrusted.current
         let metrics = ActionMetrics.current, phase = ActionMetrics.phase
@@ -221,24 +225,26 @@ extension Input {
     /// Cleanup must run even on cancellation/revocation, but may only read state until this decision returns.
     /// A failed check releases outside displays instead of deliberately choosing an unchecked window.
     static func dragCleanup(at point: CGPoint, pid: pid_t?) async -> DragCleanup {
-        let environment = environment, route = ActionRoute.check, token = Untrusted.current
+        let environment = environment, route = ActionRoute.check, token = Untrusted.current, pools = guardPoolOverrides
         return await Task.detached {
-            await Input.$environment.withValue(environment) {
-                await Untrusted.scope(token: token) {
-                    let initial = try? await guardWork { try dragCleanupState(at: point, pid: pid, environment: environment) }
-                    var safe = false
-                    if let initial, initial.owner == pid, pid != nil || environment != nil {
-                        do {
-                            // Recheck the *drop*, including current window ownership and protected replacement paths.
-                            if let route { try await route(.drag(from: point, to: point, pid: pid)) }
-                            safe = route != nil || environment != nil
-                        } catch { safe = false }
+            await Input.$guardPoolOverrides.withValue(pools) {
+                await Input.$environment.withValue(environment) {
+                    await Untrusted.scope(token: token) {
+                        let initial = try? await guardWork { try dragCleanupState(at: point, pid: pid, environment: environment) }
+                        var safe = false
+                        if let initial, initial.owner == pid, pid != nil || environment != nil {
+                            do {
+                                // Recheck the *drop*, including current window ownership and protected replacement paths.
+                                if let route { try await route(.drag(from: point, to: point, pid: pid)) }
+                                safe = route != nil || environment != nil
+                            } catch { safe = false }
+                        }
+                        let final = try? await guardWork { try dragCleanupState(at: point, pid: pid, environment: environment) }
+                        safe = safe && final != nil && final?.owner == initial?.owner
+                        // The release point is the latest reading's, never an earlier one checked against other windows.
+                        return DragCleanup(escape: safe && final?.prompts == false && final?.focused == pid,
+                                           source: safe, fallback: final?.fallback ?? offscreen, fallbackSafe: final?.fallbackSafe ?? false)
                     }
-                    let final = try? await guardWork { try dragCleanupState(at: point, pid: pid, environment: environment) }
-                    safe = safe && final != nil && final?.owner == initial?.owner
-                    // The release point is the latest reading's, never an earlier one checked against other windows.
-                    return DragCleanup(escape: safe && final?.prompts == false && final?.focused == pid,
-                                       source: safe, fallback: final?.fallback ?? offscreen, fallbackSafe: final?.fallbackSafe ?? false)
                 }
             }
         }.value

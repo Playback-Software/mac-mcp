@@ -92,8 +92,12 @@ public enum OpenRoutes {
     /// Why a file mustn't be opened (with `explicitApp`, or else its default handler), or nil: a protected path, an
     /// app or launcher, anything executable, or a handler the policy denies. Links and aliases are followed.
     public static func fileRefusal(_ url: URL, explicitApp: URL?, policy: Policy) -> String? {
+        fileRefusal(url, explicitApp: explicitApp, policy: policy, roots: nil)
+    }
+
+    static func fileRefusal(_ url: URL, explicitApp: URL?, policy: Policy, roots: ProtectedPaths.Roots?) -> String? {
         let path = url.path
-        if let r = ProtectedPaths.refusal(path) { return r }
+        if let r = ProtectedPaths.firstRefusal([path], roots: roots) { return r }
         let resolved = URL(fileURLWithPath: ProtectedPaths.aliasTarget(ProtectedPaths.physical(path)) ?? ProtectedPaths.physical(path))
         let name = url.lastPathComponent
         for u in [url, resolved] {
@@ -199,11 +203,16 @@ public enum OpenRoutes {
     }
 
     public static func openingRefusal(url: URL, policy: Policy) -> String? {
+        openingRefusal(url: url, policy: policy, roots: nil)
+    }
+
+    static func openingRefusal(url: URL, policy: Policy, roots: ProtectedPaths.Roots?) -> String? {
         guard url.isFileURL else { return nil }
-        if let r = ProtectedPaths.refusal(url.path) { return r }
+        let roots = roots ?? ProtectedPaths.Roots()
+        if let r = ProtectedPaths.firstRefusal([url.path], roots: roots) { return r }
         if isAppBundle(url) { return policy.refusal(appAt: url) }
         if isPlainFolder(url) { return nil }
-        return fileRefusal(url, explicitApp: nil, policy: policy)
+        return fileRefusal(url, explicitApp: nil, policy: policy, roots: roots)
     }
 
     static func isAppBundle(_ url: URL) -> Bool {
@@ -247,7 +256,7 @@ public enum OpenRoutes {
     /// delete it, get its info), or nil. An unreadable selection is let through here, since most chords leave the
     /// selection alone: `finderKeyRefusal` and `mutationSelectionRefusal` refuse it for the keys that depend on it.
     public static func protectedSelectionRefusal(_ urls: [URL]?) -> String? {
-        urls?.lazy.compactMap { ProtectedPaths.refusal($0.path) }.first
+        urls.flatMap { ProtectedPaths.firstRefusal($0.lazy.map(\.path)) }
     }
 
     /// Why opening these selected files (with `explicitApp`, or each one's default handler) must be refused, or nil.
@@ -258,9 +267,11 @@ public enum OpenRoutes {
                 + "Double-click the item, or use mac_app action=launch app=<App> open=<path>."
         }
         if let explicitApp, let r = policy.refusal(appAt: explicitApp) { return r }
+        // One resolution of the protected locations serves every selected item.
+        let roots = urls.isEmpty ? nil : ProtectedPaths.Roots()
         for url in urls {
-            if let r = explicitApp == nil ? openingRefusal(url: url, policy: policy)
-                : ProtectedPaths.refusal(url.path) ?? launcherReason(url).map({ "Refused: \(Untrusted.inline(url.lastPathComponent)) \($0), so MacMCP doesn't open it." }) {
+            if let r = explicitApp == nil ? openingRefusal(url: url, policy: policy, roots: roots)
+                : ProtectedPaths.firstRefusal([url.path], roots: roots) ?? launcherReason(url).map({ "Refused: \(Untrusted.inline(url.lastPathComponent)) \($0), so MacMCP doesn't open it." }) {
                 return r
             }
         }
