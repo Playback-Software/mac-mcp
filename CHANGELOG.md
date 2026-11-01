@@ -15,6 +15,7 @@ MacMCP is in early development, so tools and policy keys may change before 1.0.
   edit only MacMCP's entry, keep a backup in MacMCP's protected support folder, and refuse files they can't parse.
 - A Claude Code plugin with a driving-macos skill: `/plugin marketplace add Playback-Software/mac-mcp`.
 - `scripts/measure-actions.py` and `MAC_MCP_DEBUG_ACTIONS=1` for per-action walk counts and timings.
+- [Benchmarks](docs/benchmarks.md): the 31-task agent suite with Claude Haiku 5.5, and action timings.
 - `CONTRIBUTING.md` and this changelog.
 - A `VERSION` file at the repo root. `scripts/build.sh` reads it, and a unit test fails if the CLI's version differs.
 - A GitHub Actions workflow that builds, runs the unit tests and runs `scripts/lint-blocking.sh` on a macOS 26
