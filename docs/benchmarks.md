@@ -66,9 +66,6 @@ Which change saved what isn't measured separately.
 | C2 | Chrome: fill in and submit a form | pass | 14 | 3 | 25 s |
 | C3 | Chrome: sign in to a web app and read an order | pass | 10 | 0 | 23 s |
 
-before {"label": "before", "agentVersion": "0.1.1 (50edfc1-20261030190627)", "recordedAt": "2026-10-31T02:08:53.660800+00:00", "count": 30, "warmup": 2, "summary": {"mac_click": {"wallMs": {"median": 539.3026459999959, "p90": 550.639916999998}, "walks": {"median": 6.0, "p90": 6}, "settleMs": {"median": 460.1099585, "p90": 468.8255}, "count": 30, "unsettled": 0}, "mac_type": {"wallMs": {"median": 831.2429375000004, "p90": 842.8832079999963}, "walks": {"median": 5.0, "p90": 5}, "settleMs": {"median": 383.84693749999997, "p90": 399.106375}, "count": 30, "unsettled": 0}, "mac_key": {"wallMs": {"median": 
-after {"label": "after", "agentVersion": "0.1.1 (db46d13-20261030185747)", "recordedAt": "2026-10-31T02:06:21.976739+00:00", "count": 30, "warmup": 2, "summary": {"mac_click": {"wallMs": {"median": 446.1068959999999, "p90": 491.7237080000021}, "walks": {"median": 4.0, "p90": 4}, "settleMs": {"median": 373.99547900000005, "p90": 396.301916}, "count": 30, "unsettled": 0}, "mac_type": {"wallMs": {"median": 845.1685419999978, "p90": 880.460832999999}, "walks": {"median": 4.0, "p90": 4}, "settleMs": {"median": 389.5410835, "p90": 431.046834}, "count": 30, "unsettled": 0}, "mac_key": {"wallMs": {"median":
-
 Times include the model's own thinking, not just MacMCP's work.
 
 ## Action speed
