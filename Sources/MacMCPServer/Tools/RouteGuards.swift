@@ -26,7 +26,7 @@ enum RouteGuards {
             case let .success(p): policy = p
             case let .failure(e): return e.description as String?
             }
-            return refusal(step, policy: policy, clipboard: info, sequence: sequence)
+            return Self.refusal(step, policy: policy, clipboard: info, sequence: sequence)
         }
         if let refusal { throw ActionError(refusal, audit: "Refused: input route") }
     }
