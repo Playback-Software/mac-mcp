@@ -86,7 +86,7 @@ The [tool reference](docs/tools.md) describes each one.
 ```bash
 scripts/setup-signing.sh   # once: a signing certificate in a dedicated keychain
 scripts/build.sh           # build, sign and install ~/Applications/MacMCP.app and ~/.local/bin/mac-mcp, start the agent
-mac-mcp doctor             # check permissions and the session
+mac-mcp setup              # at the Mac, in Terminal: grant the permissions, then add MacMCP to a client
 ```
 
 The CLI is installed in `~/.local/bin`; add it to your `PATH` or use the full path.
@@ -97,10 +97,26 @@ valid code-signing identity, such as an Apple Development certificate from Xcode
 Terminal without this step. With several, it stops and lists them; set `MAC_MCP_SIGNING_IDENTITY` to the SHA-1 of the one
 you want. See [Signing](docs/architecture.md#signing).
 
-On first launch macOS asks you to grant **MacMCP** *Accessibility* (shown as "Device Control" on macOS 27) and
-*Screen & System Audio Recording*. Approve both, then run `mac-mcp doctor` until everything reads `OK`.
+MacMCP needs two grants: *Accessibility* (shown as "Device Control" on macOS 27) and *Screen & System Audio Recording*.
+`mac-mcp setup` checks that you're logged in with the screen unlocked and that the agent is running, then takes them one
+at a time. It opens the System Settings pane, says what to switch on, and waits until the grant shows up (Return skips
+a step). It never clicks or toggles anything and never answers a macOS prompt; that is yours. It ends with the
+`mac-mcp doctor` report and offers to add MacMCP to a client. Without a terminal, or over SSH, it prints the steps,
+checks once, and exits nonzero if something is missing. `mac-mcp doctor` shows the same state at any time.
 
 Connect a client on the Mac itself, or from another machine over SSH:
+
+```bash
+mac-mcp install --client claude-code                       # claude-code, claude-desktop, codex, cursor or vscode
+mac-mcp install --client codex --remote you@your-mac       # a client on another machine, reaching this Mac over SSH
+mac-mcp install --client cursor --dry-run                  # show the change without writing
+mac-mcp uninstall --client claude-code
+```
+
+This adds a server called `mac` (`--name` to change it) to the client's user config. Claude Code is registered with
+`claude mcp add` when `claude` is on your `PATH`. The other configs are edited in place: only the MacMCP entry changes,
+the original is copied to `<file>.macmcp-backup-<time>` first, and a file that doesn't parse is left alone. See
+[Registering clients](docs/architecture.md#registering-clients). Or by hand:
 
 ```bash
 claude mcp add mac -- ~/.local/bin/mac-mcp

@@ -6,7 +6,9 @@ import Testing
     private let folders = [".op", ".config/rclone", ".oci", ".config/configstore", ".gemini", ".config/github-copilot", ".config/fish",
                            ".config/zsh", ".config/doctl", ".wrangler", "Library/Application Support/doctl",
                            "Library/Preferences/.wrangler", "Library/Application Support/com.vercel.cli",
-                           ".claude", ".codex", ".cursor", "Library/Application Support/Claude"]
+                           ".claude", ".codex", ".cursor", "Library/Application Support/Claude",
+                           "Library/Application Support/Code/User", "Library/Application Support/Code - Insiders/User",
+                           "Library/Application Support/Cursor/User"]
     private let files = [".config/git/credentials", ".cargo/credentials.toml", ".cargo/credentials", ".gem/credentials", ".m2/settings.xml",
                          ".m2/settings-security.xml", ".gradle/gradle.properties", ".vault-token", ".pgpass", ".my.cnf", ".s3cfg", ".boto",
                          ".claude.json", ".gitconfig", ".config/git/config"]
@@ -37,7 +39,8 @@ import Testing
     @Test func neighboursOfTheNewEntriesStayUsable() {
         for path in ["~/.cargo/bin/cargo", "~/.cargo/registry/index", "~/.gem/specs", "~/.m2/repository/a/b.jar", "~/.gradle/caches/x",
                      "~/.codexrc", "~/.claude-other/x", "~/.config/git/ignore", "~/.config/git/attributes", "~/.gitignore", "~/.gitconfig-work",
-                     "~/.config/zsh-other/x", "~/.config/fishy", "~/.opt/x", "~/.oci-other", "~/Library/Preferences/com.apple.finder.plist",
+                     "~/.config/zsh-other/x", "~/Library/Application Support/Code/CachedData/x",
+                     "~/Library/Application Support/Code/logs/x", "~/.config/fishy", "~/.opt/x", "~/.oci-other", "~/Library/Preferences/com.apple.finder.plist",
                      "~/Library/Application Support/Code/settings.json", "~/Library/Application Support/doctl-other"] {
             #expect(!ProtectedPaths.isProtected(path), "\(path)")
             #expect(!ProtectedPaths.isProtectedFromMutation(path), "\(path)")
