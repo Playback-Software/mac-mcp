@@ -1,13 +1,16 @@
 # Tools
 
-A person can stop and pause all mutating calls with ⌃⌥⇧⌘. or `mac-mcp pause`. While paused they return:
+A person can stop and pause all mutating calls with ⌃⇧⌘\ (Control–Shift–Command–backslash) or `mac-mcp pause`. Calls refused before starting return:
 
 ```text
 Refused: Paused by a person. Ask a person to run `mac-mcp resume` in Terminal.
 ```
 
-Read-only tools and list/get variants still work under their existing policy checks. Tell the person and wait;
-there is no resume tool, hotkey toggle or menu action. `mac_doctor` reports the pause state, and input to MacMCP's
+Calls stopped after starting instead say: "Stopped by a person's pause after this call started; it may have partly
+or fully run. Check with mac_snapshot before retrying." A call completed before the pause keeps its success result.
+Read-only tools and list/get variants still work under their existing policy checks, but cannot launch a new
+automation Safari session while paused. Tell the person and wait;
+there is no resume tool, hotkey toggle or menu action. `mac_doctor` reports pause and hotkey registration status, and input to MacMCP's
 own PID, status item or menu is always refused. See [Person control](policy-and-security.md#a-persons-stop-control).
 
 ```text

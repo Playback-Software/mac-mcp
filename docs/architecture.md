@@ -222,24 +222,40 @@ before claim/action-lock waits, and pause revokes all permits synchronously befo
 Input guards and AX writes check the permit too; resuming cannot revive an old request. Cancelled action-lock
 waiters are removed promptly. Existing `Deadline`, subprocess cancellation and input-session cleanup paths stop
 work and release held keys/buttons or cancel a drag while retaining the action lock through cleanup.
+Permits distinguish admission, execution and completion. Revocation before execution is `refused`; once started,
+the call is `stopped` with a warning that it may have partly or fully run and needs a snapshot before retrying.
+Completion is recorded inside the body task, so a pause after completion cannot replace success while its caller
+is waiting to receive the result.
 
 `PersonControl` restores the private `pause-state` file before the MCP listener starts. Its separate `0600`
 control socket accepts only `pause`, `resume` and `status` from the CLI, with bounded frames and I/O deadlines.
 There is no corresponding MCP dispatch route. Native threads handle the listener, state writes and durability;
-neither the main thread nor Swift/GCD shared workers wait on control IPC or file synchronization. The disk latch
-is atomic, synced and armed before tools are served. After its first startup every restart starts paused; resume
-opens only the current incarnation and leaves that disk latch armed, so a crash or disk failure cannot erase the
-newest stop. Resume is queued asynchronously behind any pending Safari stop and compares the revision captured
-when its command arrived, so a newer hotkey pause wins. Write failures leave the live latch closed.
-Control events are logged and audited; pauses and failures alert a person. A pause also stops the automation Safari session.
+neither the main thread nor Swift/GCD shared workers wait on control IPC or file synchronization. Atomic, synced
+JSON keeps the actual `paused`/`running` state, revision and pause reason; restarts restore the last saved state.
+The old plain `paused` record migrates as paused. A missing file initializes running, and corrupt, unsafe or
+unreadable files fail closed with their restoration error. Resume writes running before opening the memory latch,
+is queued asynchronously behind any pending Safari stop and compares the revision captured when its command
+arrived, so a newer hotkey pause wins and its paused state is saved again. Write failures leave the live latch
+closed; a crash before an asynchronous pause write finishes can restore the previous saved state.
+Control events are logged and audited; pauses and failures alert a person. A pause also stops the automation Safari
+session. `SafariBridge` requires a revocable permit to start a new session even for a read-only caller; a web read
+cannot relaunch it while paused. Both MCP and control socket paths are validated before startup, including the
+`.control` suffix and NUL within the 104-byte `sun_path` limit (MCP path at most 95 UTF-8 bytes).
 
 `AgentIndicator` registers Carbon's pause-only global hotkey and owns the AppKit status item, all on the main
 thread. The existing `NSApplication` accessory event loop and `LSUIElement` in `scripts/build.sh` already provide
 the required lifecycle without a Dock icon. A single asynchronous 500 ms poll reads the action lock, active
-call labels and GUI lease (`currentAsync` on native threads), then updates the UI only if it changed. The item
+call labels and GUI lease (a reader on native threads that decodes only when inode/mtime changes), then updates
+the UI only if it changed. The item
 shows a session/holder while a call or lease is active, for five seconds after action completion, and while paused.
 `--hide-indicator` skips this poll and item; hotkey registration remains active. `--pause-hotkey KEY_SPEC` changes
-the chord at startup. Both options live in the person-owned LaunchAgent arguments, outside auto-tightening policy.
+the chord at startup. The default is ⌃⇧⌘\ (Control–Shift–Command–backslash); known system chords, including
+sysdiagnose and contrast, are refused.
+See the [shortcut review](policy-and-security.md#a-persons-stop-control). Carbon registration status remains visible
+in `mac-mcp status`, `mac_doctor` and resume replies, including after resuming a registration failure. Partial
+registration failures and application termination remove the handler and hotkey; termination cancels the poll.
+Session labels retain a short session ID instead of cutting off the whole suffix.
+Both options live in the person-owned LaunchAgent arguments, outside auto-tightening policy.
 PID checks supplement the existing unconditional bundle-ID refusal for MacMCP itself, including unsigned agent
 instances, coordinate hits and focused menus. See [the resume trust boundary](policy-and-security.md#a-persons-stop-control).
 
@@ -266,7 +282,8 @@ box. They catch:
 
 `Subprocess` runs every child (`osascript`, the script host, `shortcuts`, `launchctl`) on one kqueue thread, so no
 worker waits for a child. A child leads its own process group, and timeouts and cancellation signal the whole group
-(SIGTERM, then SIGKILL after 2 s), so helpers it started die with it. stdout and stderr are each capped at 16 MiB; past
+(SIGTERM, then SIGKILL after 2 s), so helpers in that group die with it. Work already dispatched to an external
+service, including Shortcuts' background runner, may continue after its CLI is terminated. stdout and stderr are each capped at 16 MiB; past
 that the child is stopped, `Output.truncated` is set, stderr ends with a note, and a child that still exited 0 is
 reported as exit 1. A call cancelled before it spawns never spawns.
 
@@ -279,7 +296,7 @@ reported as exit 1. A call cancelled before it spawns never spawns.
 | `mac-mcp setup` | Guided first run at the Mac: session and agent checks, then the Accessibility and Screen Recording grants, the doctor's report, and an offer to add MacMCP to a client. See [Setup](#setup) |
 | `mac-mcp install --client NAME` / `uninstall --client NAME` | Add MacMCP to an AI client's MCP config, or take it out: `[--name mac] [--remote user@host] [--dry-run] [--create]`. See [Registering clients](#registering-clients) |
 | `mac-mcp install` / `uninstall [--purge]` | Install or remove the LaunchAgent (`--purge` also removes the app, its support folder and the approved-policy records in the login keychain) |
-| `mac-mcp start` / `stop` / `restart` / `status` | Control the agent (works over SSH) |
+| `mac-mcp start` / `stop` / `restart` / `status` | Control the agent (works over SSH); start, restart, install and status print its pause state, and status includes hotkey registration |
 | `mac-mcp logs [--audit] [-n N]` | Agent log or audit log |
 | `mac-mcp call <tool> ['{json}'] [--save-image PATH] [--timeout S]` | Call one tool from a shell (debugging, scripts) |
 | `mac-mcp alerts setup ntfy TOPIC [--server URL]` / `setup url URL` / `test` / `off` / `status` | Where to send alerts when a person is needed (writes and approves `alert_webhook`, sends a test) |

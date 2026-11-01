@@ -3,28 +3,35 @@ import Carbon
 import MacMCPCore
 
 @MainActor
-final class AgentIndicator: NSObject {
+final class AgentIndicator: NSObject, NSApplicationDelegate {
     private let controls: PersonControl
     private let hidden: Bool
     private var item: NSStatusItem?
     private var hotkey: EventHotKeyRef?
     private var handler: EventHandlerRef?
     private var lastDisplay: String?
+    private var poll: Task<Void, Never>?
+    private let leaseReader = LeaseStore.InputCheck(token: nil)
 
     init(controls: PersonControl, arguments: [String]) {
         self.controls = controls
         hidden = arguments.contains("--hide-indicator")
         super.init()
         do {
-            try register(PersonControl.hotkey(arguments: arguments))
+            let key = try PersonControl.hotkey(arguments: arguments)
+            try register(key)
+            AgentPause.shared.setHotkeyStatus("registered (\(PersonControl.hotkeyLabel(key)))")
         } catch {
-            controls.pause(source: "hotkey registration failure: \(error)")
+            unregister()
+            AgentPause.shared.setHotkeyStatus("UNAVAILABLE (\(error)); fix the shortcut conflict or configuration and restart MacMCP to retry")
+            controls.pause(source: "hotkey registration failure: \(error)", reason: "Paused because the stop hotkey could not be registered")
         }
         if !hidden {
-            Task { [weak self] in
-                while let self {
+            poll = Task { [weak self] in
+                while !Task.isCancelled {
+                    guard let self else { return }
                     let lock = await ActionLock.shared.status
-                    let lease = await LeaseStore.currentAsync()
+                    let lease = await leaseReader.currentAsync()
                     let state = AgentPause.shared.status
                     let label = lock.holder ?? lease?.holder ?? state.active ?? state.recent
                     update(paused: state.paused, label: label)
@@ -32,6 +39,18 @@ final class AgentIndicator: NSObject {
                 }
             }
         }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        poll?.cancel()
+        unregister()
+        if let item { NSStatusBar.system.removeStatusItem(item); self.item = nil }
+    }
+
+    private func unregister() {
+        if let hotkey { UnregisterEventHotKey(hotkey); self.hotkey = nil }
+        if let handler { RemoveEventHandler(handler); self.handler = nil }
+        AgentPause.shared.setHotkeyStatus("not registered")
     }
 
     private func register(_ key: KeySpec) throws {
@@ -64,10 +83,7 @@ final class AgentIndicator: NSObject {
             lastDisplay = nil
             return
         }
-        let name = label.map {
-            let prefix = String(decoding: $0.utf8.prefix(256), as: UTF8.self)
-            return String(prefix.filter { !$0.isNewline && !$0.isControl }.prefix(48))
-        }
+        let name = label.map(PersonControl.activityLabel)
         let display = paused ? "MacMCP: Paused" : "Agent driving: \(name ?? "agent")"
         let menuState = display + "\n" + (name ?? "")
         guard menuState != lastDisplay else { return }
@@ -96,8 +112,4 @@ final class AgentIndicator: NSObject {
             _ = try? await NSWorkspace.shared.open(URL(fileURLWithPath: Paths.agentLog), configuration: .init())
         }
     }
-}
-
-private extension Character {
-    var isControl: Bool { unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } }
 }

@@ -19,7 +19,7 @@ import Testing
         let state = AgentPause(paused: true)
         let server = MacMCPServer.definition(audit: AuditLog(path: directory + "/audit"), tools: MacMCPServer.tools, pause: state)
         let calls: [(String, [String: Value])] = [
-            ("mac_click", [:]), ("mac_type", [:]), ("mac_key", ["keys": "ctrl+alt+shift+cmd+period"]),
+            ("mac_click", [:]), ("mac_type", [:]), ("mac_key", ["keys": .string(PersonControl.defaultHotkey)]),
             ("mac_scroll", [:]), ("mac_drag", [:]), ("mac_hover", [:]), ("mac_menu", [:]),
             ("mac_app", ["action": "launch"]), ("mac_window", ["action": "close"]),
             ("mac_clipboard", ["action": "set"]), ("mac_script", [:]), ("mac_shortcut", ["action": "run"]),
@@ -63,7 +63,24 @@ import Testing
         }
     }
 
-    @Test func pauseCancelsDispatchedActionAndReadOnlyStillWorks() async {
+    @Test func restorationFailureRefusesCallsWithoutBlamingAPerson() async {
+        let directory = NSTemporaryDirectory() + "pause-tools-\(UUID())"
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let state = AgentPause()
+        state.pause(reason: "Paused because pause state could not be restored: saved file is corrupt")
+        let action = ToolSpec(name: "act", description: "act", annotations: .action) { _, _ in
+            Issue.record("Handler ran after restoration failure")
+            return .text("ran")
+        }
+        let server = MacMCPServer.definition(audit: AuditLog(path: directory + "/audit"), tools: [action], pause: state)
+        let result = await server.call("act", [:], context(directory))
+        #expect(result.isError)
+        #expect(text(result).contains("saved file is corrupt"))
+        #expect(text(result).hasPrefix("Refused: Paused because"))
+        #expect(!text(result).contains("by a person"))
+    }
+
+    @Test func pauseCancelsDispatchedActionAndReadOnlyStillWorks() async throws {
         let directory = NSTemporaryDirectory() + "pause-tools-\(UUID())"
         defer { try? FileManager.default.removeItem(atPath: directory) }
         let entered = Signal(), state = AgentPause()
@@ -79,8 +96,16 @@ import Testing
         let task = Task { await server.call("act", [:], context(directory)) }
         await entered.wait()
         state.pause()
-        #expect(text(await task.value) == AgentPause.refusal)
+        let stopped = await task.value
+        #expect(stopped.isError)
+        #expect(text(stopped) == AgentPause.stopped)
         #expect(text(await server.call("read", [:], context(directory))) == "answer")
+        let data = try Data(contentsOf: URL(fileURLWithPath: directory + "/audit"))
+        let entries = try String(decoding: data, as: UTF8.self).split(separator: "\n").map {
+            try JSONDecoder().withISO8601().decode(AuditEntry.self, from: Data($0.utf8))
+        }
+        #expect(entries.first { $0.tool == "act" }?.outcome == "stopped")
+        #expect(entries.first { $0.tool == "read" }?.outcome == "ok")
     }
 
     @Test func ownPIDIsRefusedByEveryRouteKind() {
@@ -111,8 +136,24 @@ import Testing
         let second = Task { await server.call("act", [:], context(directory)) }
         await waiting.wait()
         state.pause()
-        #expect(text(await first.value) == AgentPause.refusal)
-        #expect(text(await second.value) == AgentPause.refusal)
+        #expect(text(await first.value) == AgentPause.stopped)
+        #expect(text(await second.value) == AgentPause.stopped)
+    }
+
+    @Test func completedActionKeepsItsSuccessAndAuditOutcomeAfterPause() async throws {
+        let directory = NSTemporaryDirectory() + "pause-tools-\(UUID())"
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let state = AgentPause()
+        let action = ToolSpec(name: "act", description: "act", annotations: .action) { _, _ in .text("sent") }
+        let server = MacMCPServer.definition(audit: AuditLog(path: directory + "/audit"), tools: [action],
+                                             pause: state, claims: Claims())
+        let result = await server.call("act", [:], context(directory))
+        state.pause()
+        #expect(!result.isError)
+        #expect(text(result) == "sent")
+        let entry = try JSONDecoder().withISO8601().decode(AuditEntry.self,
+            from: Data(contentsOf: URL(fileURLWithPath: directory + "/audit")))
+        #expect(entry.outcome == "ok")
     }
 }
 

@@ -222,30 +222,48 @@ public enum LeaseStore {
         private let path: String
         private var stamp: Stamp?
         private var lease: Lease?
+        private let read: @Sendable (String) -> Lease?
 
-        public init(token: String?, path: String = LeaseStore.defaultPath) { self.token = token; self.path = path }
+        public init(token: String?, path: String = LeaseStore.defaultPath) {
+            self.token = token; self.path = path; read = LeaseStore.read
+        }
+
+        init(token: String?, path: String, read: @escaping @Sendable (String) -> Lease?) {
+            self.token = token; self.path = path; self.read = read
+        }
 
         public func check() throws {
+            if let lease = try current(), lease.token != token {
+                throw ActionError("Refused: GUI ownership changed during this action. Wait for the lease holder before retrying.",
+                                  audit: "Refused: GUI lease changed")
+            }
+        }
+
+        /// Also used by the activity indicator: stat on each poll, decode only when inode/mtime changes.
+        public func currentAsync() async -> Lease? {
+            await withCheckedContinuation { c in
+                LeaseStore.threads.async { c.resume(returning: try? self.current()) }
+            }
+        }
+
+        func current() throws -> Lease? {
             try lock.withLock {
                 var info = stat()
                 if stat(path, &info) != 0 {
                     guard errno == ENOENT else { throw LeaseError.io("cannot check lease; retry after checking GUI ownership") }
                     stamp = nil
                     lease = nil
-                    return
+                    return nil
                 }
                 let next = Stamp(device: info.st_dev, inode: info.st_ino, seconds: info.st_mtimespec.tv_sec,
                                  nanos: info.st_mtimespec.tv_nsec, size: info.st_size)
                 if next != stamp {
                     // A malformed or concurrently replaced file fails closed; the next step can retry its read.
-                    guard let value = LeaseStore.read(path) else { throw LeaseError.io("cannot read lease; retry after checking GUI ownership") }
+                    guard let value = read(path) else { throw LeaseError.io("cannot read lease; retry after checking GUI ownership") }
                     lease = value
                     stamp = next
                 }
-                if let lease, lease.isActive, lease.token != token {
-                    throw ActionError("Refused: GUI ownership changed during this action. Wait for the lease holder before retrying.",
-                                      audit: "Refused: GUI lease changed")
-                }
+                return lease.flatMap { $0.isActive ? $0 : nil }
             }
         }
     }

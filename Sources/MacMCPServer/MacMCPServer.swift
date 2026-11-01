@@ -27,7 +27,8 @@ public enum MacMCPServer {
         If a response says SCREEN LOCKED, NO GUI SESSION or DISPLAY ASLEEP, stop and tell the user (they unlock the \
         Mac via Remote Access), or mac_wait until=unlock while they do. Never try to unlock the Mac or answer macOS \
         permission prompts yourself. If another session is using the GUI, wait and retry later.
-        If a response says Paused by a person, tell the person and stop acting. Only a person running \
+        If a response says Paused or Stopped by a person's pause, tell the person and stop acting. A stopped call \
+        may have partly or fully run: check with mac_snapshot before retrying after resume. Only a person running \
         mac-mcp resume in Terminal may resume; do not try to resume through tools or MacMCP's own UI.
         web_* tools drive a separate automation Safari (no logins), faster and more precise than clicking. Use mac_* \
         on Safari only when a task needs the person's own logged-in browser.

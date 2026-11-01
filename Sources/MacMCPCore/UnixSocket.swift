@@ -9,6 +9,8 @@ public struct SocketError: Error, CustomStringConvertible {
 
 /// Minimal AF_UNIX stream sockets: the agent listens, the relay connects.
 public enum UnixSocket {
+    public static func validatePath(_ path: String) throws { _ = try address(path) }
+
     private static func address(_ path: String) throws -> sockaddr_un {
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -24,6 +26,7 @@ public enum UnixSocket {
     /// Binds and listens on `path`, replacing any stale socket file. The socket is made owner-only (0600):
     /// whoever can connect can drive this Mac.
     public static func listen(path: String, backlog: Int32 = 16) throws -> Int32 {
+        var addr = try address(path)
         let dir = (path as NSString).deletingLastPathComponent
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
@@ -33,7 +36,6 @@ public enum UnixSocket {
         unlink(path)
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw SocketError("socket", path: path) }
-        var addr = try address(path)
         let bound = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))

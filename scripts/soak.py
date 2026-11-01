@@ -260,6 +260,14 @@ def main() -> int:
     global MODERN
     MODERN = not args.legacy
 
+    status = subprocess.run([str(CLI), "status"], capture_output=True, text=True)
+    if status.returncode != 0 or "Agents are running (not paused)." not in status.stdout:
+        print("Cannot soak: the agent is paused or its pause state is unavailable.\n"
+              + (status.stdout + status.stderr).strip()
+              + "\nCheck `mac-mcp status`; run `mac-mcp resume` in Terminal when you are ready, then retry.",
+              file=sys.stderr)
+        return 1
+
     if not HOST_APP.exists():
         print(f"FAIL: {HOST_APP} is not installed, so there is nothing to soak. Run scripts/build-testhost.sh first.",
               file=sys.stderr)

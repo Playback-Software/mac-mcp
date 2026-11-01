@@ -32,7 +32,7 @@ apply at once; edits that loosen it wait until you approve them with `mac-mcp po
 | `web.deny_hosts` · `web.allow_hosts` | Hosts (and their subdomains) the web tools may not, or may only, open, read or act on. Only http(s) URLs are ever opened. |
 | `web.allow_private_hosts` | Whether the web tools may open this Mac and private-network addresses: `localhost`, `127.x`, `10.x`, `172.16–31.x`, `192.168.x`, link-local (including cloud metadata at `169.254.169.254`), `*.local`. Off by default; a host listed in `allow_hosts` is allowed either way. Names that merely resolve to such an address aren't caught. |
 | `shortcuts.allowed` | Shortcuts (name, case-insensitive, or identifier) that `mac_shortcut` may run. Empty by default. A shortcut can do anything its actions can (shell scripts, files, messages), so allow only ones you'd be happy for an agent to run unattended. `mac_shortcut list` shows them all either way. |
-| `shortcuts.timeout_seconds` | How long `mac_shortcut` lets a shortcut run before stopping it (default 60 seconds; a call's own `timeout` replaces it, and 300 is the maximum either way). |
+| `shortcuts.timeout_seconds` | How long `mac_shortcut` waits before terminating its CLI subprocess (default 60 seconds; a call's own `timeout` replaces it, and 300 is the maximum either way). Shortcuts' background runner may continue work already dispatched to it. |
 | `clipboard_read` | Whether `mac_clipboard` may read the clipboard. With it off, pasting (⌘V, Edit ▸ Paste) is refused too unless the clipboard holds text MacMCP put there, since pasting into a document and reading it back would read the clipboard. Whatever the setting, a clipboard that a password manager marked as secret (`org.nspasteboard.ConcealedType` or `TransientType`, as 1Password and Apple Passwords do), or that came from a denied app (`org.nspasteboard.source`), is never read or pasted. |
 | `rate_limit_per_second` | Actions are spaced out to at most this rate. |
 | `alert_webhook` | POSTs a plain-text alert (ntfy-compatible) when work is blocked on a person: screen locked, a macOS prompt, a missing permission, an invalid policy, policy changes waiting for approval. |
@@ -201,29 +201,57 @@ security and permission prompts, and apps on the policy's deny list.
 
 ### A person's stop control
 
-Press **⌃⌥⇧⌘.** (Control–Option–Shift–Command–period), choose **Stop and pause agents** in the
+Press **⌃⇧⌘\** (Control–Shift–Command–backslash), choose **Stop and pause agents** in the
 MacMCP menu bar item, or run `mac-mcp pause`. The hotkey uses Carbon `RegisterEventHotKey`; it needs no
-Input Monitoring grant. It only pauses, even when pressed again or synthesized by an agent. The extra Shift
-avoids macOS's ⌃⌥⌘. increase-contrast shortcut. Apple's [shortcut list](https://support.apple.com/en-us/102650)
-does not assign the four-modifier chord; custom app and user shortcuts may still collide. If registration fails,
-MacMCP starts paused and logs, audits and alerts the failure.
+Input Monitoring grant. It only pauses, even when pressed again or synthesized by an agent.
+
+The default uses a key available on laptop keyboards without Fn, three ordinary modifiers to avoid common app
+commands, and omits Option to avoid VoiceOver's Control–Option commands. The shortcut review checked
+`man sysdiagnose`, the read-only
+`defaults read com.apple.symbolichotkeys`, Apple's [system and accessibility shortcuts](https://support.apple.com/en-us/102650),
+the [Accessibility Shortcuts panel](https://support.apple.com/en-gb/guide/mac-help/mchlp2975/27/mac/27),
+[VoiceOver general](https://support.apple.com/en-ie/guide/voiceover/cpvokys01/mac) and
+[search commands](https://support.apple.com/en-ie/guide/voiceover/cpvokys08/mac),
+[Safari shortcuts](https://support.apple.com/en-au/guide/safari/cpsh003/27.0/mac/27), Xcode's bundled default key bindings,
+and the published [VS Code](https://code.visualstudio.com/docs/reference/default-keybindings) and
+[Chrome](https://support.google.com/chrome/answer/157179?hl=en-HK) defaults. No stock assignment for ⌃⇧⌘\ was found
+in these sources. This is not a reservation: custom shortcuts, other apps and future macOS versions may collide.
+The old ⌃⌥⇧⌘. default **starts sysdiagnose**, as its manual documents; Apple's general list omits that chord.
+⌃⌥⌘, and ⌃⌥⌘. decrease/increase contrast; ⌃⌥⇧⌘K is VoiceOver's previous colour change. These and other known
+system chords are refused as configured stop keys,
+even if the corresponding feature is disabled. Registration failures start MacMCP paused with the failure reason,
+log/audit/alert it, and remain visible in status, doctor and resume replies. Fix the conflict or configuration and
+restart to retry registration; resuming alone does not register the key.
 
 Pausing revokes every admitted mutating call before cancelling its task, including calls waiting for a claim or
 the action lock. They stay revoked after resume. Each input step and accessibility write checks that revocation;
-paired key/button/modifier releases and checked drag cleanup still run. Cancellation terminates script and
-Shortcut subprocess groups. The automation Safari session is stopped too. Already-delivered app IPC and effects
+paired key/button/modifier releases and checked drag cleanup still run. Cancellation terminates the script host
+and the `/usr/bin/shortcuts` subprocess group. Work already handed to Shortcuts' background runner may continue;
+MacMCP cannot guarantee that pausing stops that work. The automation Safari session is stopped too. Already-delivered app IPC and effects
 already committed by an app cannot be recalled; a pause is not a rollback.
 
-All mutating tools, including browser navigation, JavaScript, dialog replies, clipboard writes, apps, windows and
-Shortcuts, return:
+Mutating calls refused before their body starts, including browser navigation, JavaScript, dialog replies,
+clipboard writes, apps, windows and Shortcuts, return:
 
 ```text
 Refused: Paused by a person. Ask a person to run `mac-mcp resume` in Terminal.
 ```
 
+Calls stopped after starting return the following, audited as `stopped` rather than `refused`:
+
+```text
+Stopped by a person's pause after this call started; it may have partly or fully run. Check with mac_snapshot before retrying.
+```
+
+A call completed successfully before revocation keeps its success result and `ok` audit outcome, even if the
+response reaches its caller after the pause. Check the UI before retrying a stopped call to avoid repeating a
+committed action such as Send. A pause caused by damaged state or an unavailable control names that cause instead
+of claiming that a person paused.
+
 Read-only tools and list/get variants still answer, subject to their usual policy and session checks. This lets
 an agent diagnose and report what stopped without adding authority to change the screen. Pausing does not revoke
-permission to read; use the app policy or stop the service if reads must stop too.
+permission to read; use the app policy or stop the service if reads must stop too. Web reads can use an existing
+automation Safari session, but cannot start or restart one while paused, since launching a browser changes the screen.
 
 Only **`mac-mcp resume`**, run by a person in Terminal, resumes. There is no resume hotkey, MCP tool, menu item,
 AX action or URL handler. MacMCP's own bundle ID and current PID are refused regardless of app policy, including
@@ -231,6 +259,8 @@ coordinate hits on its status item, keyboard focus in its menu, and direct acces
 to a separate owner-only Unix socket (`mcp.sock.control` beside the MCP socket); MCP frames and tool arguments
 cannot dispatch its commands. This is the same trust boundary as policy approval: code already running as the
 account can use the CLI or control socket. The socket cannot prove that a human typed the command.
+Both socket paths are validated before startup; `MAC_MCP_SOCKET` must fit in 95 UTF-8 bytes, leaving room for
+`.control` and the terminating NUL in macOS's 104-byte `sun_path`. An overlong path stops startup with a clear error.
 
 **Keep terminals and shell-equivalent routes denied.** If a person allows Terminal, JXA, an arbitrary-command
 Shortcut or another route that runs code, an agent can arrange a delayed `mac-mcp resume` before being paused.
@@ -238,28 +268,30 @@ Input is refused even in an allowed Terminal while paused, but commands already 
 tool gate. Granting that power removes the person-only guarantee; it is outside the tool-only threat model in
 [SECURITY.md](../SECURITY.md). A TTY or a synthetic-key tag would not restore that guarantee.
 
-The restart latch is saved atomically with owner-only permissions in
-`~/Library/Application Support/MacMCP/pause-state`, before accepting tools. Once this file exists, every agent
-restart starts paused, including a watchdog restart after a crash. `mac-mcp resume` opens only the running
-incarnation's memory latch and leaves the disk latch armed. A person must resume after an upgrade or restart,
-even if the agent was running beforehand. This availability trade keeps a crash or failed asynchronous pause
-write from undoing a person's stop. Damaged or unreadable state fails closed; the very first startup creates the
-latch before serving and may run until paused.
+The current state (`paused` or `running`), its revision and any pause reason are saved atomically with owner-only
+permissions in `~/Library/Application Support/MacMCP/pause-state`, before accepting tools. Restarts, including
+watchdog restarts, reboots and upgrades, restore the last saved state. Resume saves `running` before opening the
+memory latch. A missing file on first startup is initialized as running; an old `paused`-only file migrates as
+paused. Damaged, unsafe or unreadable state fails closed, with a message explaining the restoration failure.
 
 The hotkey latches in memory immediately. Native workers handle file synchronization and stopping Safari; logging, audit and webhook work are scheduled away from the main thread.
-Persistence failures leave the running agent paused and are reported. Resume requires a successful state write,
+Persistence failures leave the live agent paused and are reported; a crash before a pause write completes can
+restore the previous saved state. Resume requires a successful state write,
 waits asynchronously behind any pending Safari stop, and a newer pause arriving after the resume request wins.
 
 The menu bar item shows **Agent driving** with the active session or lease holder, or **MacMCP: Paused**. It remains
 visible for five seconds after an action. Its menu has stop, a disabled instruction to use Terminal when paused,
-and **Open log**; it never offers resume. `mac-mcp status` and `mac_doctor` report the pause state.
+and **Open log**; it never offers resume. Session labels use a short identifier, and the lease file is decoded
+only when its inode/mtime changes. `mac-mcp start`, `restart`, `install` and `status` print the pause state.
+`status`, `mac_doctor` and resume replies also show whether the hotkey is registered. The integration and soak
+harnesses stop up front if paused or unable to determine pause state; they never resume it themselves.
 
-A person can add `--pause-hotkey ctrl+alt+shift+cmd+period` with another key spec, or `--hide-indicator`, to the
+A person can add `--pause-hotkey ctrl+shift+cmd+backslash` with another key spec, or `--hide-indicator`, to the
 agent's `ProgramArguments` in its LaunchAgent plist, then restart it. These are agent startup options, separate
 from policy.json: the LaunchAgent and installed executable are protected from tool-driven edits. Changing the
 hotkey or hiding the item therefore requires the same person/code-execution authority as changing the agent's
 launch configuration; it cannot auto-apply as a policy tightening. Hiding the indicator does not disable the hotkey.
-Choose a chord with at least two ordinary modifiers and without a session-ending shortcut. Build/install refreshes
+Choose a chord with at least two ordinary modifiers, no Fn, and no known system or session-ending shortcut. Build/install refreshes
 may replace LaunchAgent arguments, so recheck person-added options after reinstalling.
 
 ### Untrusted text
@@ -312,7 +344,8 @@ writes:
 | `mac_script`, `mac_shortcut` and `web_eval` outcomes | Exit status, an error category, how long the output was and nothing of its text: `applescript → Notes: exit 1, script error, 8 chars of stderr`. A script can print whatever it read, and no filter can tell a secret from the rest |
 | Details of the other tools | The role and ref of what was acted on (`e6 button → clicked e6 button (accessibility press)`, `hovered e6 button at 40,12`), and the tool's own words in errors. Anything marked as screen text (labels, tooltips, window titles, dialog titles) is replaced by `…`. Then known secret values are removed and the line is cut at 120 characters (200 for successes) |
 
-`outcome` is `ok`, `error`, or `refused` for calls the policy and safety layers turned down. If the log can't be
+`outcome` is `ok`, `error`, `refused` for policy/safety refusals (including a pause before execution), or `stopped`
+for calls interrupted by a pause after starting. If the log can't be
 written, the agent log (`~/Library/Logs/MacMCP/agent.log`) says so: the first failure at once, then at most one a
 minute with a count of how many were missed.
 
