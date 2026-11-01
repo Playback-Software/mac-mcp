@@ -191,6 +191,7 @@ read [Policy and security](docs/policy-and-security.md) before you give it real 
   marked as untrusted data with a per-response token that page text can't forge.
 - **Audit log.** Every call is recorded in `~/Library/Logs/MacMCP/audit.jsonl`, with typed text, keys, script source
   and URL secrets redacted. `mac-mcp report` summarises it.
+- **Person stop.** ⌃⌥⇧⌘. or `mac-mcp pause` stops and pauses agents; the menu bar shows who is driving, and only `mac-mcp resume` in Terminal resumes them.
 - **Local by design.** The socket is owner-only, there is no network listener, and remote access goes through SSH.
 
 Found a way around these? Please report it privately; see [SECURITY.md](SECURITY.md).

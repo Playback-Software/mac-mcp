@@ -255,6 +255,8 @@ public final class SafariBridge: @unchecked Sendable {
     // MARK: session
 
     private func ensureStarted() async throws {
+        try AgentPause.permit?.check()
+        try Task.checkCancellation()
         if fake != nil || lock.withLock({ process?.isRunning ?? false }) { return }
         guard FileManager.default.isExecutableFile(atPath: Self.executable) else {
             throw BridgeError.unavailable("\(Self.executable) not found (needs Safari 27 or later)")
@@ -270,6 +272,8 @@ public final class SafariBridge: @unchecked Sendable {
         let current = lock.withLock { () -> Int in session += 1; return session }
         p.terminationHandler = { [weak self] _ in self?.failAll(session: current) }
         try p.run()
+        do { try AgentPause.permit?.check(); try Task.checkCancellation() }
+        catch { p.terminate(); throw error }
         lock.withLock {
             process = p
             input = stdin.fileHandleForWriting
@@ -312,6 +316,7 @@ public final class SafariBridge: @unchecked Sendable {
     /// Sends one request and waits for its reply, however long that takes (callers bound it). If the caller gives up
     /// first, the request stays in `inFlight` as abandoned until safarimcp answers it; a late reply is then dropped.
     private func exchange(_ method: String, _ params: Value) async throws -> Value {
+        try AgentPause.permit?.check()
         let id = lock.withLock { () -> Int in defer { nextID += 1 }; return nextID }
         let tool = method == "tools/call" ? params["name"]?.stringValue ?? method : method
         let touchesPage = method == "tools/call" && !Self.pageIndependent.contains(tool)
@@ -430,9 +435,11 @@ public final class SafariBridge: @unchecked Sendable {
 
     private func write(_ message: Value) {
         let data = message.jsonData() + Data([0x0A])
+        let permit = AgentPause.permit
         let (handle, current, child) = lock.withLock { (input, session, process) }
         guard let handle else { return }
         writer.async { [self] in
+            do { try permit?.check() } catch { return }
             guard lock.withLock({ session == current && input === handle }) else { return }
             do { try StreamIO.writeAll(handle.fileDescriptor, data, deadline: StreamIO.now + 20) }
             catch { child?.terminate(); failAll(session: current) }

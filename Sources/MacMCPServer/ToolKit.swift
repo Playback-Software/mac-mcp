@@ -153,6 +153,7 @@ func currentPolicy() async -> PolicyCheck {
 
 /// Refuses when policy forbids seeing or driving this app (or is invalid). Returns nil when allowed.
 func policyGuard(_ app: AppInfo) async -> ToolOutput? {
+    if let refusal = AgentSafety.refusal(pid: app.pid) { return .error(refusal) }
     switch await currentPolicy() {
     case let .failure(out): return out
     case let .success(p): return p.refusal(bundleID: app.bundleID, name: app.name).map { .error($0) }

@@ -32,10 +32,12 @@ public actor ActionLock {
     /// `DeadlineExceeded` if `body` outlives `deadline` (waiting doesn't count toward it).
     public func run<T: Sendable>(_ name: String = "action", deadline: TimeInterval = 20, maxWait: TimeInterval = 30,
                                  _ body: @escaping @Sendable () async throws -> T) async throws -> T {
+        let label = AgentPause.permit.map { name + " by " + $0.label } ?? name
         let waitingSince = ContinuousClock.now
-        let acquired = await acquire(name, maxWait: maxWait)
+        let acquired = await acquire(label, maxWait: maxWait)
         ActionMetrics.current?.addTime(.lockWait, since: waitingSince)
         guard let mine = acquired else {
+            try Task.checkCancellation()
             throw ActionLockBusy(name: name, holder: holder?.name, waited: maxWait)
         }
         let input = Input.Session()
@@ -95,7 +97,12 @@ public actor ActionLock {
             try? await Task.sleep(for: .milliseconds(Int(maxWait * 1000)))
             self.expire(id)
         }
-        return await withCheckedContinuation { waiters.append((id, name, $0)) }
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation {
+                if Task.isCancelled { $0.resume(returning: nil) }
+                else { waiters.append((id, name, $0)) }
+            }
+        } onCancel: { Task { await self.expire(id) } }
     }
 
     private func expire(_ id: UInt64) {

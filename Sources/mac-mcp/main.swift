@@ -12,7 +12,7 @@
 //                          Add MacMCP to an AI client's MCP config (claude-code, claude-desktop, codex, cursor, vscode).
 //   mac-mcp uninstall [--purge]
 //   mac-mcp uninstall --client NAME [--name mac] [--dry-run]
-//   mac-mcp start | stop | restart | status
+//   mac-mcp start | stop | restart | status | pause | resume
 //   mac-mcp logs [--audit] [-n N]
 //   mac-mcp call <tool> ['{json}'] [--save-image PATH] [--timeout SECONDS]
 //   mac-mcp lease acquire [--minutes N] [--reason TEXT] [--holder NAME] [--pid PID]
@@ -761,16 +761,25 @@ case "start", "restart":
 case "stop":
     requireNoForeignLease(args, "stopping the agent")
     let (code, out) = LaunchAgent.stop()
-    say(code == 0 ? "agent stopped. Run `mac-mcp start` to resume." : "failed (\(code)): \(out)")
+    say(code == 0 ? "agent stopped. Run `mac-mcp start`, then `mac-mcp resume` in Terminal." : "failed (\(code)): \(out)")
+case "pause", "resume":
+    guard args.isEmpty, let control = PersonControl.Command(rawValue: command) else { fail("usage: mac-mcp \(command)") }
+    do {
+        let reply = try PersonControl.request(control)
+        if control == .resume, reply.hasPrefix(AgentPause.refusal) { fail(reply) }
+        say(reply)
+    } catch { fail(unreachable(error)) }
 case "status":
     say("agent: \(LaunchAgent.status())")
+    do { say(try PersonControl.request(.status)) }
+    catch { say("pause state: unavailable (agent control socket unreachable)") }
 case "logs":
     let n = args.firstIndex(of: "-n").flatMap { args.indices.contains($0 + 1) ? Int(args[$0 + 1]) : nil } ?? 50
     logs(audit: args.contains("--audit"), lines: n)
 case "version", "--version":
     say("mac-mcp \(cliVersion)")
 case "help", "--help", "-h":
-    say("usage: mac-mcp [relay | doctor | setup | install [--client NAME [--name mac] [--remote user@host] [--dry-run] [--create]] | uninstall [--purge | --client NAME [--name mac] [--dry-run]] | start | stop | restart | status | "
+    say("usage: mac-mcp [relay | doctor | setup | install [--client NAME [--name mac] [--remote user@host] [--dry-run] [--create]] | uninstall [--purge | --client NAME [--name mac] [--dry-run]] | start | stop | restart | status | pause | resume | "
         + "logs [--audit] [-n N] | call <tool> [json] | lease acquire|release|status | alerts setup|test|off|status | policy approve [--expect-sha256 HEX]|status|prune | report [--since 7d] [--top N] | remote-setup [--name mac] | version]")
 default:
     fail("unknown command '\(command)'. Try `mac-mcp help`.")

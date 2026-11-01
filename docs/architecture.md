@@ -215,6 +215,34 @@ semaphore and condition waits, unless the line says why it runs off the pool.
 Dedicated-thread timers use monotonic deadlines and Darwin's relative condition wait, so a wall-clock adjustment
 cannot extend their waits. A wait rechecks its deadline at least every 100 ms.
 
+## Person control and activity indicator
+
+`AgentPause` is a small locked latch with one revocable permit per mutating tool call. The dispatcher registers
+before claim/action-lock waits, and pause revokes all permits synchronously before cancelling their tasks.
+Input guards and AX writes check the permit too; resuming cannot revive an old request. Cancelled action-lock
+waiters are removed promptly. Existing `Deadline`, subprocess cancellation and input-session cleanup paths stop
+work and release held keys/buttons or cancel a drag while retaining the action lock through cleanup.
+
+`PersonControl` restores the private `pause-state` file before the MCP listener starts. Its separate `0600`
+control socket accepts only `pause`, `resume` and `status` from the CLI, with bounded frames and I/O deadlines.
+There is no corresponding MCP dispatch route. Native threads handle the listener, state writes and durability;
+neither the main thread nor Swift/GCD shared workers wait on control IPC or file synchronization. The disk latch
+is atomic, synced and armed before tools are served. After its first startup every restart starts paused; resume
+opens only the current incarnation and leaves that disk latch armed, so a crash or disk failure cannot erase the
+newest stop. Resume is queued asynchronously behind any pending Safari stop and compares the revision captured
+when its command arrived, so a newer hotkey pause wins. Write failures leave the live latch closed.
+Control events are logged and audited; pauses and failures alert a person. A pause also stops the automation Safari session.
+
+`AgentIndicator` registers Carbon's pause-only global hotkey and owns the AppKit status item, all on the main
+thread. The existing `NSApplication` accessory event loop and `LSUIElement` in `scripts/build.sh` already provide
+the required lifecycle without a Dock icon. A single asynchronous 500 ms poll reads the action lock, active
+call labels and GUI lease (`currentAsync` on native threads), then updates the UI only if it changed. The item
+shows a session/holder while a call or lease is active, for five seconds after action completion, and while paused.
+`--hide-indicator` skips this poll and item; hotkey registration remains active. `--pause-hotkey KEY_SPEC` changes
+the chord at startup. Both options live in the person-owned LaunchAgent arguments, outside auto-tightening policy.
+PID checks supplement the existing unconditional bundle-ID refusal for MacMCP itself, including unsigned agent
+instances, coordinate hits and focused menus. See [the resume trust boundary](policy-and-security.md#a-persons-stop-control).
+
 ## Health checks
 
 Every 10 minutes the agent checks itself (`HealthMonitor`). Problems are logged, sent to the policy's
@@ -257,6 +285,7 @@ reported as exit 1. A call cancelled before it spawns never spawns.
 | `mac-mcp alerts setup ntfy TOPIC [--server URL]` / `setup url URL` / `test` / `off` / `status` | Where to send alerts when a person is needed (writes and approves `alert_webhook`, sends a test) |
 | `mac-mcp policy approve` / `status` / `prune` | Apply changes to `policy.json` that loosen it (it lists them first and records the approval in the login keychain), show which policy is in force, when it was approved and what's waiting, or delete older approval records that other builds made (macOS asks for the keychain password for each). See [Approving changes](policy-and-security.md#approving-changes) |
 | `mac-mcp lease acquire` / `release` / `status` | Take the GUI for yourself (evals, GUI tests): other clients may look but not act, and agent reinstalls wait |
+| `mac-mcp pause` / `resume` | Person control: stop and pause all mutations, or resume through the separate local control socket; `status` also reports this state |
 | `mac-mcp remote-setup [--name mac]` | Checks Remote Login, the agent and the policy, then prints the `claude mcp add … -- ssh …` line for another machine. Never touches `~/.ssh` |
 | `mac-mcp version` | The CLI version |
 | `mac-mcp report [--since 7d] [--top N]` | Real use from the audit log: sessions and where they came from, route share (GUI input vs direct routes vs looking), errors and refusals grouped by kind, slowest calls. Evals and tests are counted separately |
