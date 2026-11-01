@@ -61,6 +61,33 @@ public enum Walker {
         public init() {}
     }
 
+    /// The final settle walk, offered only to the snapshot immediately after it.
+    public struct Capture: Sendable {
+        let root: AXElement
+        let clip: CGRect?
+        let descendMenus: Bool
+        let tree: RawNode
+        let stats: WalkStats
+        let taken: ContinuousClock.Instant
+        /// A walk older than this may miss a change made after settle (a sheet dismissed in between), so it's taken anew.
+        static let maxAge: Duration = .milliseconds(500)
+
+        init(root: AXElement, options: Options, tree: RawNode, stats: WalkStats, taken: ContinuousClock.Instant = .now) {
+            self.root = root
+            clip = options.clip
+            descendMenus = options.descendMenus
+            self.tree = tree
+            self.stats = stats
+            self.taken = taken
+        }
+
+        func matches(_ root: AXElement, options: Options, now: ContinuousClock.Instant = .now) -> Bool {
+            self.root == root && tree.element == root && clip == options.clip && descendMenus == options.descendMenus
+                && stats.complete && stats.textComplete && stats.visited <= options.maxNodes
+                && taken.duration(to: now) < Self.maxAge
+        }
+    }
+
     /// The reads a walk makes, so tests can walk a synthetic tree (with its own clock) through the real walker.
     /// `read`, `attributeRead` and `elements` report which reads failed and how (`AXElement.Read`); a source without
     /// failures can be built from plain dictionaries.
@@ -112,8 +139,16 @@ public enum Walker {
         isLabelSource(name, role: role) || (name == "AXValue" && !Snapshot.stateValueRoles.contains(role))
     }
 
-    public static func walk(_ root: AXElement, options: Options = Options()) -> (RawNode, WalkStats) {
+    public static func walk(_ root: AXElement, options: Options = Options(), reusing capture: Capture? = nil) -> (RawNode, WalkStats) {
+        if let capture, capture.matches(root, options: options) {
+            ActionMetrics.current?.reuseWalk(ActionMetrics.phase)
+            return (capture.tree, capture.stats)
+        }
         var stats = WalkStats()
+        let metrics = ActionMetrics.current, phase = ActionMetrics.phase
+        let measuredStart = ContinuousClock.now
+        metrics?.startWalk(phase)
+        defer { metrics?.endWalk(phase, since: measuredStart, nodes: stats.visited) }
         let source = options.source
         let started = source.now()
         let deadline = started.addingTimeInterval(options.timeLimit)

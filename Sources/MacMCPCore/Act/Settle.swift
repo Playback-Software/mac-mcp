@@ -20,6 +20,13 @@ public enum Settle {
     public struct Result: Sendable {
         public let settled: Bool
         public let milliseconds: Int
+        public let finalWalk: Walker.Capture?
+
+        public init(settled: Bool, milliseconds: Int, finalWalk: Walker.Capture? = nil) {
+            self.settled = settled
+            self.milliseconds = milliseconds
+            self.finalWalk = finalWalk
+        }
     }
 
     /// Nodes a signature walk may visit when the app answers quickly enough, and the least a budget is cut to from
@@ -52,13 +59,14 @@ public enum Settle {
     }
 
     /// One sample. `nodeBudget` bounds the tree walk; the stats say whether it stopped short of the budget (by time).
-    static func signature(pid: pid_t, nodeBudget: Int, timeLimit: TimeInterval) -> (hash: Int, walk: WalkStats?) {
+    static func signature(pid: pid_t, nodeBudget: Int, timeLimit: TimeInterval) -> (hash: Int, walk: WalkStats?, capture: Walker.Capture?) {
         var h = Hasher()
         h.combine(NSWorkspace.shared.frontmostApplication?.processIdentifier)
         combineWindows(WindowServer.onScreenWindows(), pid: pid, into: &h)
         let app = AXElement.application(pid: pid, timeout: 0.5)
         if let focused = app.element(kAXFocusedUIElementAttribute) { h.combine(focused) }
         var walk: WalkStats?
+        var capture: Walker.Capture?
         if let window = app.element(kAXFocusedWindowAttribute) {
             var options = Walker.Options()
             options.maxNodes = nodeBudget
@@ -66,15 +74,30 @@ public enum Settle {
             options.clip = Walker.screenBounds
             let (tree, stats) = Walker.walk(window, options: options)
             walk = stats
+            capture = Walker.Capture(root: window, options: options, tree: tree, stats: stats)
             for row in Snapshot.rows(from: tree, pid: pid) { h.combine(row.render(frames: true)) }
         }
-        return (h.finalize(), walk)
+        return (h.finalize(), walk, capture)
     }
 
     public static func wait(pid: pid_t, quiet: Int = 250, timeout: TimeInterval = 2.0) async -> Result {
-        await wait(quiet: quiet, timeout: timeout) {
-            calibratedSample(pid: pid) { budget, timeLimit in signature(pid: pid, nodeBudget: budget, timeLimit: timeLimit) }
+        await wait(pid: pid, quiet: quiet, timeout: timeout) { budget, timeLimit in
+            signature(pid: pid, nodeBudget: budget, timeLimit: timeLimit)
         }
+    }
+
+    static func wait(pid: pid_t, quiet: Int, timeout: TimeInterval,
+                     signature: (Int, TimeInterval) -> (hash: Int, walk: WalkStats?, capture: Walker.Capture?)) async -> Result {
+        var finalWalk: Walker.Capture?
+        let result = await wait(quiet: quiet, timeout: timeout) {
+            finalWalk = nil
+            return calibratedSample(pid: pid) { budget, timeLimit in
+                let sample = signature(budget, timeLimit)
+                finalWalk = sample.capture
+                return (sample.hash, sample.walk)
+            }
+        }
+        return Result(settled: result.settled, milliseconds: result.milliseconds, finalWalk: result.settled ? finalWalk : nil)
     }
 
     /// One sample under the process's learned budget, or nil when it isn't comparable (a walk cut short by time

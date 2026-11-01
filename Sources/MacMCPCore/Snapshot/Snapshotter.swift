@@ -84,7 +84,7 @@ public enum Snapshotter {
             ? .notResponding(app.name) : .noWindow(app.name)
     }
 
-    public static func take(_ req: SnapshotRequest, refs: RefStore = .shared) async throws -> SnapshotResult {
+    public static func take(_ req: SnapshotRequest, refs: RefStore = .shared, reusing capture: Walker.Capture? = nil) async throws -> SnapshotResult {
         let app: AppInfo
         do {
             if let pid = req.pid, let running = NSRunningApplication(processIdentifier: pid) { app = AppInfo(running) }
@@ -94,8 +94,10 @@ public enum Snapshotter {
         } catch let e as AppResolveError { throw SnapshotError.app(e) }
 
         let appElement = AXElement.application(pid: app.pid)
+        var reusable = capture
         var stillFillingIn = false   // Electron/Chromium tree switched on just now and hasn't grown yet
         if await AccessibilityEnabler.shared.ensureEnabled(app) {
+            reusable = nil
             log("enabled full accessibility tree for \(app.label) (pid \(app.pid))")
             stillFillingIn = !(await waitForTreeToGrow(appElement))
         }
@@ -157,7 +159,7 @@ public enum Snapshotter {
             root = bar
         }
 
-        let (tree, stats) = Walker.walk(root, options: options)
+        let (tree, stats) = Walker.walk(root, options: options, reusing: reusable)
         if Snapshotter.menuIsOpen(appElement, tree: tree) {
             blockers.append("a menu is open: choose one of its items, or press esc to close it")
         }

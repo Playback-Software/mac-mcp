@@ -58,6 +58,7 @@ public enum MacMCPServer {
             }
             let deadline = spec.deadline(args)
             let sessionID = session.id, origin = session.origin, leaseHolder = await session.leaseHolder
+            let metrics = ActionMetrics.enabled && name.hasPrefix("mac_") && spec.mutates(args) ? ActionMetrics.Recorder() : nil
             let output: ToolOutput
             do {
                 let admission: Claims.Admission?
@@ -78,7 +79,7 @@ public enum MacMCPServer {
                                 try await Deadline.run(deadline + 5) {
                                     if let admission { try await Claims.shared.recheck(admission) }
                                     return await Input.$leaseCheck.withValue(LeaseStore.InputCheck(token: session.leaseToken, path: session.leasePath)) {
-                                        await spec.handler(args, context)
+                                        await ActionMetrics.$current.withValue(metrics) { await spec.handler(args, context) }
                                     }
                                 }
                             }
@@ -96,6 +97,12 @@ public enum MacMCPServer {
                 }
             } catch {
                 output = .error("\(error)")
+            }
+            if let metrics {
+                let report = metrics.finish(tool: name, session: sessionID, isError: output.isError)
+                if let json = try? JSONEncoder().encode(report) {
+                    log("debug action_metrics " + String(decoding: json, as: UTF8.self))
+                }
             }
             await audit.record(AuditEntry(
                 client: client, tool: name,
