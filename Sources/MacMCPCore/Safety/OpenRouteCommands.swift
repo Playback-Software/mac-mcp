@@ -434,7 +434,7 @@ extension OpenRoutes {
         return validate(result)
     }
 
-    public static let unreadableSelectionRefusal = "Refused: Finder's selection couldn't be checked; select the items again or use a path you can see."
+    public static let unreadableSelectionRefusal = "Refused: Finder isn't reporting its selection. Ask the person to check Finder."
 
     public static func mutationSelectionRefusal(_ urls: [URL]?) -> String? {
         guard let urls else { return unreadableSelectionRefusal }
@@ -492,12 +492,29 @@ extension OpenRoutes {
     public static func itemURL(of item: AXElement) -> URL? { itemURL(of: item, tree: .accessibility) }
 
     static func itemURL<N>(of item: N, tree t: SelectionTree<N>) -> URL? {
+        itemURLRead(of: item, tree: t).url
+    }
+
+    /// An item with no URL is different from one whose unreadable parts could hide its file identity.
+    static func itemURLRead<N>(of item: N, tree t: SelectionTree<N>) -> (url: URL?, complete: Bool) {
         var level = [item]
         for _ in 0..<3 {
-            if let url = level.lazy.compactMap(t.url).first { return url }
-            level = level.flatMap { t.children($0) ?? [] }
+            // An unreadable row/container can hide the name field; an unreadable name or URL is never absence.
+            var next: [N] = []
+            var first: URL?
+            for node in level {
+                guard t.fileIdentityReadable(node) else { return (nil, false) }
+                if let url = t.url(node) {
+                    if first == nil { first = url }
+                    continue // The node already names its file; children aren't needed to find it.
+                }
+                guard let children = t.children(node) else { return (nil, false) }
+                next += children
+            }
+            if let first { return (first, true) }
+            level = next
         }
-        return nil
+        return (nil, true)
     }
 
     /// A selected row of a sidebar (Favorites, Locations, Tags) holds a place's name as static text, with no file name
@@ -508,8 +525,13 @@ extension OpenRoutes {
 
     static func isSidebarPlace<N>(_ row: N, in list: N, tree t: SelectionTree<N>) -> Bool {
         guard t.role(list) == kAXOutlineRole, t.role(row) == kAXRowRole else { return false }
-        guard let cells = t.children(row) else { return false }
-        let parts = cells.flatMap { t.children($0) ?? [] }
+        guard t.fileIdentityReadable(row), let cells = t.children(row) else { return false }
+        var parts: [N] = []
+        for cell in cells {
+            guard t.fileIdentityReadable(cell), let children = t.children(cell) else { return false }
+            parts += children
+        }
+        guard parts.allSatisfy({ t.fileIdentityReadable($0) && t.role($0) != nil }) else { return false }
         return !parts.isEmpty && !parts.contains { t.role($0) == kAXTextFieldRole }
     }
 

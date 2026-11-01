@@ -14,6 +14,8 @@ struct SelectionTree<N> {
     var selected: (N) -> ListSelection<N>
     /// AXURL on the element itself.
     var url: (N) -> URL?
+    /// A failed file name or URL must not be mistaken for an absent one, even if another URL read succeeds.
+    var fileIdentityReadable: (N) -> Bool = { _ in true }
     var identifier: (N) -> String? = { _ in nil }
     var frame: (N) -> CGRect? = { _ in nil }
     /// Whether two nodes are the same element; nodes never match without it.
@@ -33,28 +35,49 @@ enum ListSelection<N> {
 }
 
 extension SelectionTree where N == AXElement {
-    static var accessibility: SelectionTree {
-        SelectionTree(role: { e in
+    static var accessibility: SelectionTree { reading(.live) }
+
+    static func reading(_ source: Walker.Source) -> SelectionTree {
+        func identity(_ e: AXElement) -> AXElement.Read? {
+            var read = source.read(e, AXLeaf.identityAttributes)
+            if read?.errors.values.contains(.failure) == true { read = source.read(e, AXLeaf.identityAttributes) }
+            return read
+        }
+        return SelectionTree(role: { e in
                           // `kAXErrorFailure` is what some apps answer for an attribute they don't have: believed the second time.
-                          var read = e.attribute(reporting: kAXRoleAttribute)
-                          if read.error == .failure { read = e.attribute(reporting: kAXRoleAttribute) }
+                          var read = source.attributeRead(e, kAXRoleAttribute)
+                          if read.error == .failure { read = source.attributeRead(e, kAXRoleAttribute) }
                           return read.error == nil ? read.value as? String : nil
                       },
                       children: { e in
-                          var read = e.elements(reporting: kAXChildrenAttribute)
-                          if read.error == .failure { read = e.elements(reporting: kAXChildrenAttribute) }
+                          var read = source.elements(e, kAXChildrenAttribute)
+                          if read.error == .failure { read = source.elements(e, kAXChildrenAttribute) }
+                          if read.error == .failure, let info = identity(e) {
+                              var errors = info.errors
+                              errors[kAXChildrenAttribute] = .failure
+                              if AXLeaf.ignoresChildrenFailure(role: info.values[kAXRoleAttribute] as? String ?? "", errors: errors) { return [] }
+                          }
                           return read.error == nil ? read.elements : nil
                       },
-                      parent: { $0.element(kAXParentAttribute) },
+                      parent: { source.attribute($0, kAXParentAttribute).flatMap(AXElement.from) },
                       selected: { e in
-                          var read = e.read(reporting: selectionAttributes)
-                          if read?.errors.values.contains(.failure) == true { read = e.read(reporting: selectionAttributes) }
+                          var read = source.read(e, selectionAttributes)
+                          if read?.errors.values.contains(.failure) == true { read = source.read(e, selectionAttributes) }
                           return selection(from: read)
                       },
-                      url: { OpenRoutes.url(of: $0, levels: 0) },
-                      identifier: { $0.string(kAXIdentifierAttribute) },
+                      url: { e in
+                          let value = source.attribute(e, kAXURLAttribute)
+                          let url = value as? URL ?? (value as? String).flatMap(URL.init(string:))
+                          return url.flatMap(OpenRoutes.resolved)
+                      },
+                      fileIdentityReadable: { e in
+                          guard let read = identity(e), let role = read.values[kAXRoleAttribute] as? String else { return false }
+                          let needed = AXLeaf.roles.contains(role) ? AXLeaf.identityAttributes : [kAXRoleAttribute, kAXURLAttribute]
+                          return !needed.contains { read.errors[$0] != nil }
+                      },
+                      identifier: { source.attribute($0, kAXIdentifierAttribute) as? String },
                       frame: { e in
-                          let v = e.read([kAXPositionAttribute, kAXSizeAttribute]) ?? [:]
+                          let v = source.read(e, [kAXPositionAttribute, kAXSizeAttribute])?.values ?? [:]
                           return MacMCPCore.frame(position: v[kAXPositionAttribute], size: v[kAXSizeAttribute])
                       },
                       same: ==)
@@ -157,9 +180,12 @@ extension OpenRoutes {
                 read.pathBar = chain
                 continue
             }
-            let urls = items.lazy.compactMap { itemURL(of: $0, tree: t) }
-            let first = urls.first
-            guard first != nil || inBrowser || finderViewIdentifiers.contains(t.identifier(e) ?? "") else { continue }
+            let identities = items.map { itemURLRead(of: $0, tree: t) }
+            let first = identities.compactMap(\.url).first
+            guard first != nil || inBrowser || finderViewIdentifiers.contains(t.identifier(e) ?? "") else {
+                if identities.contains(where: { !$0.complete }) { read.complete = false }
+                continue
+            }
             var list = FinderList(node: e, selected: selected.items, folder: first?.deletingLastPathComponent(), column: inBrowser)
             if inBrowser {
                 if list.folder == nil { list.folder = lastColumnSelection }
@@ -289,6 +315,7 @@ extension OpenRoutes {
         var node: N? = hit
         for _ in 0..<6 {
             guard let n = node else { break }
+            guard t.fileIdentityReadable(n) else { return .unreadable }
             if let url = t.url(n) { return url.isFileURL ? .item(url) : .unreadable }
             guard let role = t.role(n) else { return .unreadable }
             if fileListRoles.contains(role) || [kAXWindowRole, kAXApplicationRole, kAXScrollAreaRole, kAXBrowserRole].contains(role) {

@@ -82,8 +82,16 @@ enum RouteGuards {
             if let r = AgentSafety.refusal(pid: hit.pid) { return r }
             let hitPID = point.flatMap { WindowServer.owner(at: $0) } ?? hit.pid
             if let r = AgentSafety.refusal(pid: hitPID) { return r }
-            let remote = NSRunningApplication(processIdentifier: hitPID)?.bundleIdentifier == OpenRoutes.panelService
-            let owner = remote ? pid ?? hitPID : hitPID
+            let service = NSRunningApplication(processIdentifier: hitPID)?.bundleIdentifier == OpenRoutes.panelService
+            let host = pid ?? point.flatMap { OpenRoutes.filePanelHost(of: hit, at: $0) }
+            let remote = service && host.map { candidate in
+                OpenRoutes.filePanelOwnsPoint(owner: hitPID, host: candidate, at: point, hit: hit)
+            } == true
+            if service, !remote {
+                return "Refused: the point isn't in a verified file panel attached to the target app. Take mac_snapshot and retry."
+            }
+            let owner = remote ? host ?? hitPID : hitPID
+            if let r = AgentSafety.refusal(pid: owner) { return r }
             if WindowServer.isSystemPrompt(pid: owner) { return "Refused: a person must answer this macOS prompt." }
             if let running = NSRunningApplication(processIdentifier: owner),
                let r = policy.refusal(bundleID: running.bundleIdentifier, name: running.localizedName) { return r }
@@ -195,8 +203,11 @@ enum RouteGuards {
         }
     }
 
-    static func dragTargets(source: AXElement, destination: AXElement, from: CGPoint, to: CGPoint, pid: pid_t?) -> [ActionRoute.Step] {
-        [.target(source, point: from, pid: pid, opens: false), .target(destination, point: to, pid: pid, opens: false)]
+    static func dragTargets(source: AXElement, destination: AXElement, from: CGPoint, to: CGPoint, pid: pid_t?,
+                            destinationHost: (AXElement, CGPoint) -> pid_t? = { OpenRoutes.filePanelHost(of: $0, at: $1) }) -> [ActionRoute.Step] {
+        // A cross-app drop resolves its own host, then the target guard verifies it just as it verifies the source.
+        [.target(source, point: from, pid: pid, opens: false),
+         .target(destination, point: to, pid: destinationHost(destination, to), opens: false)]
     }
 
     static func checksDropFolder(owner: String?, panel: Bool) -> Bool {

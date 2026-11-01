@@ -439,9 +439,13 @@ The routes that open things are checked against the app policy as well:
   A failed read is told apart from an attribute an element doesn't have: a list whose selected rows or children fail
   to read has an unknown selection, even when the other reads empty, and an element whose role or children fail to
   read could hide a file list, so the window's selection is unknown too.
+  In selection reads only, the exception is a repeated `kAXErrorFailure` for `AXChildren` on a known leaf
+  (`AXTextField`, `AXStaticText`, `AXImage`) whose file-identifying value, title and URL reads succeeded or were absent. That error can't hide a file
+  list. An item with a readable URL of its own doesn't need a children read to find its file. Failed name or URL
+  reads, and failed children on rows and containers without their own URL, still leave the selection unknown.
   When it can't be read (no file list in the window, a list whose selection can't be read, or a selected item with
-  no file URL), every key and menu item that acts on it is refused with "Finder's selection couldn't
-  be checked; select the items again or use a path you can see": ⌘C, ⌘X, ⌘V, ⌥⌘V, ⌘D, ⌘L, ⌘⌫, Return, Enter, Delete,
+  no file URL), every key and menu item that acts on it is refused with "Finder isn't reporting its selection.
+  Ask the person to check Finder": ⌘C, ⌘X, ⌘V, ⌥⌘V, ⌘D, ⌘L, ⌘⌫, Return, Enter, Delete,
   ⌘I, ⌥⌘I, ⌘Y, ⌘R, ⌘O, ⌘↓, Space and every ⌃⌘ chord. The same goes for the items of the Finder, File and Edit
   menus, the toolbar's Action menu and contextual menus, however they are chosen (`mac_menu`, a click, Return or
   Space on the highlighted item), except those whose key equivalent is one that leaves the selection alone (New
@@ -453,6 +457,8 @@ The routes that open things are checked against the app policy as well:
   usual, and so does everything when the selection is readable and safe. With nothing selected, Get Info and the
   inspector show the window's folder, which is checked instead. While focus is in a text field (a name being edited,
   the search field), keys edit its text.
+  If Finder persistently stops reporting its selection, a person can quit and reopen Finder to clear it. Agents
+  must ask the person to check Finder; they must not quit or relaunch it as a workaround.
 - Finder sets no AXDocument on its windows, so a window's folder is the parent of the first items it lists (each
   column's in column view, where an empty column's folder is the one selected before it), or the path bar's last
   folder. An empty icon, list or gallery view names none.
@@ -544,8 +550,12 @@ The routes that open things are checked against the app policy as well:
   bar (above the normal level, in a display's top strip, no taller than its menu bar) and the Dock's own level don't
   count. Route checks have a separate two-second budget for AX walks and file/handler lookups; per-step focus
   and prompt guards retain their 250 ms budget, on GCD workers with the response's untrusted-text token preserved.
-- Drag drop checks use the current window owner at both endpoints. Protected replacement checks apply to Finder
-  and Open/Save panel browsers, including remote panel services. On abort, Escape is sent only with no system
+- Drag drop checks use the current window owner at both endpoints. A panel-service window is attributed to a host
+  only when that specific service pid is freshly found in the host's attached panel and matches the hit element's
+  pid. A hit in the panel's frame must also belong to that panel by AX ancestry; linked popup menus may overflow
+  the frame. A drag destination resolves and verifies its own host, whose app policy is checked.
+  Protected replacement checks apply to Finder and Open/Save panel browsers, including remote panel services.
+  On abort, Escape is sent only with no system
   prompt and verified keyboard focus in the source app. Returning to the source also needs fresh ownership and drop
   route checks, so a custom drag view that ignores Escape still cannot receive an unchecked source drop.
   If those checks fail or time out, cleanup releases over the menu bar's left end, before the Apple menu, on a

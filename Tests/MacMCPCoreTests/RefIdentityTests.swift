@@ -659,6 +659,7 @@ private final class FaultyTree: Sendable {
         var rows: [Int32]? = nil
         var rowsFail = false
         var titleElement: Int32?
+        var selected: [Int32]?
     }
     private let nodes = Mutex<[Int32: Node]>([:])
     /// Every read made, as (node, attributes): the retry budget is one extra read, so tests can count them.
@@ -671,15 +672,17 @@ private final class FaultyTree: Sendable {
 
     func add(_ n: Int32, role: String, title: String? = nil, value: String? = nil, failed: Set<String> = [],
              errors: [String: AXError] = [:], transient: Set<String> = [], readFails: Bool = false, children: [Int32] = [],
-             rows: [Int32]? = nil, rowsFail: Bool = false, titleElement: Int32? = nil) {
+             rows: [Int32]? = nil, rowsFail: Bool = false, titleElement: Int32? = nil, url: URL? = nil,
+             selected: [Int32]? = nil) {
         var values = ["AXRole": role]
         if let title { values["AXTitle"] = title }
         if let value { values["AXValue"] = value }
+        if let url { values["AXURL"] = url.absoluteString }
         var all = errors
         for name in failed { all[name] = .cannotComplete }
         nodes.withLock {
             $0[n] = Node(values: values, errors: all, transient: transient, readFails: readFails, children: children,
-                         rows: rows, rowsFail: rowsFail, titleElement: titleElement)
+                         rows: rows, rowsFail: rowsFail, titleElement: titleElement, selected: selected)
         }
     }
 
@@ -697,6 +700,7 @@ private final class FaultyTree: Sendable {
             guard !node.readFails else { return nil }
             var dict = node.values.mapValues { $0 as Any }
             dict["AXChildren"] = node.children.map { Self.element($0).raw }
+            if let selected = node.selected { dict["AXSelectedRows"] = selected.map { Self.element($0).raw } }
             var errors: [String: AXError] = [:]
             for name in names { if let e = error(n, node, name) { errors[name] = e; dict[name] = nil } }
             return AXElement.Read(values: dict.filter { names.contains($0.key) }, errors: errors)
@@ -705,9 +709,16 @@ private final class FaultyTree: Sendable {
             reads.withLock { $0.append((n, [name])) }
             if let e = error(n, node, name) { return (nil, e) }
             if name == "AXTitleUIElement", let t = node.titleElement { return (Self.element(t).raw, nil) }
+            if name == "AXParent" {
+                let parent = nodes.withLock { $0.first { $0.value.children.contains(n) }?.key }
+                return (parent.map { Self.element($0).raw }, nil)
+            }
             return (node.values[name], nil)
         }, elements: { [self] el, name in
-            guard let (_, node) = lookup(el) else { return ([], nil) }
+            guard let (n, node) = lookup(el) else { return ([], nil) }
+            if node.readFails { return ([], .failure) }
+            if let e = error(n, node, name) { return ([], e) }
+            if name == "AXChildren" { return (node.children.map(Self.element), nil) }
             if node.rowsFail { return ([], .cannotComplete) }
             if name == "AXVisibleRows" || name == "AXRows", let rows = node.rows { return (rows.map(Self.element), nil) }
             return ([], nil)
@@ -724,6 +735,58 @@ private final class FaultyTree: Sendable {
 }
 
 @Suite struct IdentityReadTests {
+    /// The persistent Finder failure: the name is readable but AXChildren on that leaf answers -25200. The same
+    /// source drives the real selection/drag readers and snapshot walker; unrelated value/description errors must
+    /// not stop file reads, and a failed name, URL or container must still stop them.
+    @Test func finderLeafChildrenFailuresDoNotHideReadableFiles() throws {
+        let file = URL(fileURLWithPath: "/tmp/route/one.txt")
+        for failure in ["", "AXValue", "AXTitle", "AXURL", "row", "cell"] {
+            let t = FaultyTree()
+            t.add(0, role: "AXApplication", children: [1])
+            t.add(1, role: "AXWindow", title: "Files", errors: ["AXValue": .failure], children: [2, 7])
+            t.add(2, role: "AXOutline", children: [3], selected: [3])
+            t.add(3, role: "AXRow", errors: failure == "row" ? ["AXChildren": .failure] : [:], children: [4])
+            t.add(4, role: "AXCell", errors: failure == "cell" ? ["AXChildren": .failure] : [:], children: [5, 6])
+            t.add(5, role: "AXImage", errors: ["AXDescription": .failure])
+            var errors: [String: AXError] = ["AXChildren": .failure]
+            if failure.hasPrefix("AX") { errors[failure] = .failure }
+            t.add(6, role: "AXTextField", value: "one.txt", errors: errors, url: file)
+            t.add(7, role: "AXStaticText", value: "Status", errors: ["AXChildren": .failure])
+            let tree = SelectionTree<AXElement>.reading(t.source)
+            let window = FaultyTree.element(1), name = FaultyTree.element(6)
+            let selected = OpenRoutes.finderSelection(focused: nil, windows: { [window] }, tree: tree)
+            let focused = OpenRoutes.finderSelection(focused: name, windows: { [window] }, tree: tree)
+            let dragged = OpenRoutes.draggedFiles(name, tree: tree)
+            if failure.isEmpty {
+                #expect(selected == [file] && focused == [file] && dragged == [file])
+                for key in ["cmd+c", "cmd+v", "cmd+3"] {
+                    #expect(OpenRoutes.finderKeyRefusal(try KeySpec.parse(key), selection: selected, policy: Policy()) == nil)
+                }
+                #expect(t.walk().1.readFailures > 0, "the leaf exception is confined to selection reads, not snapshots")
+            } else {
+                #expect(selected == nil && focused == nil && dragged == nil, "\(failure)")
+                #expect(OpenRoutes.finderKeyRefusal(try KeySpec.parse("cmd+c"), selection: selected, policy: Policy()) != nil)
+                if failure != "AXURL" {
+                    #expect(t.walk().1.readFailures > 0, "\(failure)")
+                }   // URLs don't contribute snapshot text; the selection read above still refuses their failure.
+            }
+        }
+    }
+
+    @Test func snapshotsCountLeafChildrenFailuresForEveryApp() {
+        for role in ["AXTextField", "AXStaticText", "AXImage", "AXRow", "AXGroup"] {
+            for error in [AXError.failure, .cannotComplete] {
+                let t = FaultyTree()
+                t.add(1, role: "AXWindow", children: [2])
+                t.add(2, role: role, value: "Name", errors: ["AXChildren": error])
+                let (raw, stats) = t.walk()
+                #expect(!stats.complete && !stats.textComplete, "\(role) \(error)")
+                #expect(stats.readFailures > 0)
+                #expect(raw.identityUncertain && raw.textUncertain)
+            }
+        }
+    }
+
     /// The scenario from the review: an unnamed control was shown with no identifier; its re-read fails or is cut and
     /// again yields an empty label and no identifier. Equal empties must not count as unchanged when the read was
     /// uncertain, while the same read of a control that really is unnamed still passes.

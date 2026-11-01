@@ -8,13 +8,31 @@ import Testing
     @Test func dragRechecksBothTargetsWithTheirWindowServerPoints() {
         let source = AXElement.application(pid: 42), destination = AXElement.application(pid: 77)
         let from = CGPoint(x: 10, y: 20), to = CGPoint(x: 30, y: 40)
-        let checks = RouteGuards.dragTargets(source: source, destination: destination, from: from, to: to, pid: 42)
+        let checks = RouteGuards.dragTargets(source: source, destination: destination, from: from, to: to, pid: 42,
+                                             destinationHost: { _, _ in nil })
         #expect(checks.count == 2)
         for (step, expected) in zip(checks, [(source, from), (destination, to)]) {
             guard case let .target(element, point, _, _) = step else { Issue.record("Wrong route step"); continue }
             #expect(element == expected.0)
             #expect(point == expected.1) // point=nil would select hit.pid rather than the window owner
         }
+        if case let .target(_, _, pid, _) = checks[1] {
+            #expect(pid == nil, "the source app isn't the host of a cross-app drop's panel")
+        }
+    }
+
+    @Test func aDragDestinationBindsToItsOwnVerifiedPanelHost() {
+        let source = AXElement.application(pid: 2), destination = AXElement.application(pid: 3)
+        let from = CGPoint(x: 10, y: 20), to = CGPoint(x: 30, y: 40)
+        let checks = RouteGuards.dragTargets(source: source, destination: destination, from: from, to: to, pid: 42,
+                                             destinationHost: { hit, point in
+            #expect(hit == destination && point == to)
+            return 77
+        })
+        guard case let .target(_, _, sourcePID, _) = checks[0],
+              case let .target(_, _, destinationPID, _) = checks[1] else { Issue.record("Wrong route steps"); return }
+        #expect(sourcePID == 42)
+        #expect(destinationPID == 77, "the destination must be checked against its host, independently of the source")
     }
 
     /// ⇧ or ⌘ on the button going down over an unselected Finder item extends or changes the selection, and the drag

@@ -75,6 +75,12 @@ private func perform(
         if app != nil, let r = resolved, r.point != nil, r.pid != 0, r.pid != pid, let target {
             if let running = NSRunningApplication(processIdentifier: pid) { _ = await AppControl.activate(AppInfo(running)) }
             resolved = try await ActionMetrics.during(.resolve) { try await Actions.resolve(target, currentSnapshot: before.snapshot) }
+            if let r = resolved, let point = r.point,
+               try await Input.guardWork(pool: .route, timeout: Input.routeTimeout, {
+                   OpenRoutes.filePanelOwnsPoint(owner: r.pid, host: pid, at: point, hit: AXElement.systemWide.element(at: point))
+               }) {
+                resolved = Resolved(pid: pid, element: r.element, row: r.row, point: point, pixel: r.pixel)
+            }
             if let r = resolved, r.pid != 0, r.pid != pid {
                 let other = NSRunningApplication(processIdentifier: r.pid)?.localizedName ?? "another app"
                 return .error("Refused: \(r.describe) is covered by \(other), not \(app!), even with \(app!) "

@@ -73,6 +73,9 @@ guard against a ref quietly meaning something else:
   failed while its node read fine is therefore not proven gone. An identifier that failed to read is kept apart:
   it makes a ref uncertain but can't hide text, so it doesn't hold up a wait. A snapshot whose labels or values
   couldn't be read says so in a note.
+  A repeated `kAXErrorFailure` for `AXChildren` on a known leaf (`AXTextField`, `AXStaticText`, `AXImage`) is ignored
+  when its value and title reads didn't fail: Finder can persistently return that error on otherwise readable name
+  fields. Other failed text attributes remain uncertain, and rows and containers never receive this exception.
 
 Ids never repeat across agent restarts. The relay keeps a client's session through a restart, so its `e1` or `c1`
 must not resolve to whatever the new agent minted first. `IDBlocks` reserves blocks of numbers (1000 refs, 100

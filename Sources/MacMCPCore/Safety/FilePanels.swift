@@ -121,6 +121,35 @@ enum FilePanelScan {
         }
         return verdict(container, probe: { probe($0, remote: isRemote) }, children: children)
     }
+
+    /// Fresh positive evidence of which service processes are attached to this container. Unlike classification,
+    /// an AppKit identifier or browser is no reason to stop: it says nothing about who draws the panel's pixels.
+    static func servicePIDs<N>(_ root: N, probe: (N) -> Probe?, pid: (N) -> pid_t, children: (N) -> [N]?) -> Set<pid_t> {
+        var queue = [root], next = 0
+        var result: Set<pid_t> = []
+        while next < queue.count, next < visitLimit {
+            let node = queue[next]
+            next += 1
+            guard let p = probe(node) else { continue }
+            if p.remote { result.insert(pid(node)) }
+            if let kids = children(node) {
+                queue += listRoles.contains(p.role) ? Array(kids.prefix(sampledRows)) : kids
+            }
+        }
+        return result
+    }
+
+    static func servicePIDs(_ container: AXElement) -> Set<pid_t> {
+        var remote: [pid_t: Bool] = [:]
+        return servicePIDs(container, probe: { element in
+            probe(element, remote: { pid in
+                if let known = remote[pid] { return known }
+                let result = OpenRoutes.ownerBundleID(pid) == OpenRoutes.panelService
+                remote[pid] = result
+                return result
+            })
+        }, pid: { $0.pid }, children: children)
+    }
 }
 
 /// Decisions about containers that stay open: a file panel stays one while it exists, so a verdict that said so is
@@ -165,6 +194,46 @@ final class FilePanelCache<Key: Hashable>: @unchecked Sendable {
 extension OpenRoutes {
     /// The out-of-process service that shows Open and Save panels for apps.
     public static let panelService = "com.apple.appkit.xpc.openAndSavePanelService"
+
+    /// The service draws a host's panel in its own windows. Ownership alone isn't enough: a fresh host attachment
+    /// and a hit inside that panel (or an AX-linked popup menu) must agree. A nil point checks an AX ref's ancestry.
+    /// Call on a guard worker.
+    public static func filePanelOwnsPoint(owner: pid_t, host: pid_t, at point: CGPoint?, hit: AXElement? = nil) -> Bool {
+        guard let hit, owner != host, ownerBundleID(owner) == panelService else { return false }
+        return filePanelOwnsPoint(owner: owner, hitPID: hit.pid, ownerBundleID: panelService, prompt: WindowServer.isSystemPrompt(pid: owner),
+                                  point: point, panel: { activeNamingPanel(pid: host) },
+                                  servicePIDs: FilePanelScan.servicePIDs, frame: Actions.frameOf,
+                                  insidePanel: { namingPanel(of: hit) == $0 },
+                                  linkedMenu: { panel in
+            let command = commandTarget(of: hit)
+            guard [kAXMenuItemRole, kAXMenuRole].contains(command.role ?? "") else { return false }
+            if Actions.isWithin(hit, panel) { return true }
+            // Remote menus can lose their parent link while remaining children of the panel's popup control.
+            var queue = [panel], next = 0
+            while next < queue.count, next < FilePanelScan.visitLimit {
+                let node = queue[next]
+                next += 1
+                if node == hit || node == command { return true }
+                queue += FilePanelScan.children(node) ?? []
+            }
+            return false
+        })
+    }
+
+    static func filePanelOwnsPoint<N>(owner: pid_t, hitPID: pid_t, ownerBundleID: String?, prompt: Bool, point: CGPoint?, panel: () -> N?,
+                                     servicePIDs: (N) -> Set<pid_t>, frame: (N) -> CGRect?, insidePanel: (N) -> Bool,
+                                     linkedMenu: (N) -> Bool) -> Bool {
+        guard owner == hitPID, ownerBundleID == panelService, !prompt, let panel = panel(), servicePIDs(panel).contains(owner) else { return false }
+        return (insidePanel(panel) && (point.map { frame(panel)?.contains($0) == true } ?? true)) || linkedMenu(panel)
+    }
+
+    /// A drop has no explicit destination app. Use the hit's enclosing panel/window as a candidate host, then apply
+    /// the same fresh service-pid and hit checks as a source bound by app= or ref. Missing host links fail closed.
+    public static func filePanelHost(of hit: AXElement, at point: CGPoint) -> pid_t? {
+        guard let owner = WindowServer.owner(at: point), ownerBundleID(owner) == panelService else { return nil }
+        let candidates = [namingPanel(of: hit)?.pid, Input.windowOwner(of: hit)].compactMap { $0 }
+        return candidates.first { filePanelOwnsPoint(owner: owner, host: $0, at: point, hit: hit) }
+    }
 
     private static let filePanels = FilePanelCache<AXElement>(isAlive: { $0.isAlive })
 

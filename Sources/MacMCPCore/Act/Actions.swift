@@ -466,7 +466,9 @@ public enum Actions {
         ClipChain(element).visible(frame)
     }
 
-    static func pointerReaches(targetPID: pid_t, targetWindow: pid_t?, owner: pid_t?, hitPID: pid_t?, hitWindow: pid_t?, remoteOwner: Bool) -> Bool {
+    static func pointerReaches(targetPID: pid_t, targetWindow: pid_t?, owner: pid_t?, hitPID: pid_t?, hitWindow: pid_t?, remoteOwner: Bool,
+                               panelOwner: Bool? = nil) -> Bool {
+        if let panelOwner { return panelOwner }
         let host = targetWindow ?? targetPID
         let hitHost = hitWindow ?? hitPID
         guard hitHost == host else { return false }
@@ -475,9 +477,13 @@ public enum Actions {
 
     static func pointerReaches(_ hit: AXElement, _ target: AXElement?, pid: pid_t, at point: CGPoint, windows: [WindowInfo]) -> Bool {
         let owner = WindowServer.owner(at: point, in: windows)
+        let panelOwner = owner.flatMap { owner -> Bool? in
+            guard owner != pid, OpenRoutes.ownerBundleID(owner) == OpenRoutes.panelService else { return nil }
+            return OpenRoutes.filePanelOwnsPoint(owner: owner, host: pid, at: point, hit: hit)
+        }
         return pointerReaches(targetPID: pid, targetWindow: target.flatMap { Input.windowOwner(of: $0) }, owner: owner,
                               hitPID: hit.pid, hitWindow: Input.windowOwner(of: hit),
-                              remoteOwner: owner.map { Input.isRemoteService($0) } ?? false)
+                              remoteOwner: owner.map { Input.isRemoteService($0) } ?? false, panelOwner: panelOwner)
     }
 
     static func hitReaches(hitWithinTarget: Bool, targetWithinHit: Bool, hitRole: String, point: CGPoint, visible: CGRect) -> Bool {
