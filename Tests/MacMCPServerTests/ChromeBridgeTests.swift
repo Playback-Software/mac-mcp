@@ -120,6 +120,7 @@ private final class ChromeFixture: @unchecked Sendable {
         } catch { Issue.record("Chrome fixture failed during \(phase)"); await bridge.stop(); throw error }
         await bridge.stop()
         #expect(await bridge.started == false)
+        #expect(try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).isEmpty)
     }
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["MAC_MCP_CHROME_TEST"] == "1", "Opt in to isolated headless Chrome tests"))
@@ -139,7 +140,14 @@ private final class ChromeFixture: @unchecked Sendable {
             #expect(await bridge.started == false)
             let fresh = try await bridge.call("list_tabs")
             #expect(fresh.json?.arrayValue?.isEmpty == true, "A new turn uses a new empty context")
+            _ = try await bridge.call("navigate_to_url", ["url": .string("http://127.0.0.1:\(fixture.port)/")])
+            await #expect(throws: (any Error).self) {
+                try await bridge.call("evaluate_javascript", ["expression": "while(true){}"], timeout: 0.05)
+            }
+            let next = try await bridge.call("list_tabs")
+            #expect(next.json?.arrayValue?.isEmpty == true)
         } catch { await bridge.stop(); throw error }
         await bridge.stop()
+        #expect(try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil).isEmpty)
     }
 }

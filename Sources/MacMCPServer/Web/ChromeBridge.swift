@@ -1,6 +1,10 @@
 import Foundation
 import MacMCPCore
 
+private enum ChromeOperation {
+    @TaskLocal static var epoch: UInt64?
+}
+
 /// CDP in a fresh headless Chrome profile and incognito context. Never attaches to an existing browser or profile.
 public actor ChromeBridge {
     public static let shared = ChromeBridge()
@@ -26,6 +30,8 @@ public actor ChromeBridge {
     private var parked: Task<SafariBridge.Reply, Error>?
     private var parkedResult: Result<SafariBridge.Reply, Error>?
     private var interactionGeneration: UInt64 = 0
+    private var epoch: UInt64 = 0
+    private var retiring: [(process: Process, profile: URL)] = []
 
     public init() {
         executable = Self.executable; profileRoot = URL(fileURLWithPath: Paths.supportDir)
@@ -37,7 +43,21 @@ public actor ChromeBridge {
     }
     public var started: Bool { process?.isRunning == true && transport?.isOpen == true }
     public nonisolated static func stopRunning() { ChromeLifecycle.shared.stop() }
-    public func stop() { shutdown() }
+    public func stop() async {
+        shutdown()
+        let closing = retiring; retiring.removeAll()
+        for entry in closing {
+            let exited = await Task.detached {
+                let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+                while entry.process.isRunning, ContinuousClock.now < deadline {
+                    try? await Task.sleep(for: .milliseconds(10))
+                }
+                return !entry.process.isRunning
+            }.value
+            if exited { try? FileManager.default.removeItem(at: entry.profile) }
+            else { retiring.append(entry) }
+        }
+    }
 
     public func call(_ tool: String, _ arguments: [String: Value] = [:], timeout: TimeInterval = 45) async throws -> SafariBridge.Reply {
         // A modal JavaScript dialog can hold a page command open. Answer it outside the occupied page turn.
@@ -47,7 +67,8 @@ public actor ChromeBridge {
             if let why = p.refusal(bundleID: "com.google.Chrome", name: "Google Chrome") ?? p.web.refusal(url: "about:blank") {
                 throw ActionError(why)
             }
-            let result = try await perform(tool, arguments)
+            let generation = epoch
+            let result = try await ChromeOperation.$epoch.withValue(generation) { try await perform(tool, arguments) }
             return SafariBridge.Reply(text: String(decoding: result.jsonData(), as: UTF8.self), isError: false)
         }
         return try await queue.run { [self] in
@@ -60,7 +81,10 @@ public actor ChromeBridge {
                     throw ActionError(why)
                 }
                 try await start()
-                guard let result = try await Deadline.run(timeout, { try await self.perform(tool, arguments) }) else {
+                let generation = await self.epoch
+                guard let result = try await ChromeOperation.$epoch.withValue(generation, operation: {
+                    try await Deadline.run(timeout, { try await self.perform(tool, arguments) })
+                }) else {
                     await self.shutdown()
                     throw ActionError("Chrome automation timed out; its isolated session was closed. Inspect before retrying.")
                 }
@@ -110,18 +134,28 @@ public actor ChromeBridge {
     }
 
     private func shutdown() {
+        epoch &+= 1
         interactionGeneration &+= 1; parked?.cancel(); parked = nil; parkedResult = nil
         transport?.close(); transport = nil
-        if process?.isRunning == true { process?.terminate() }
+        if let process, let profile {
+            if process.isRunning { process.terminate() }
+            retiring.append((process, profile))
+        } else if let profile { try? FileManager.default.removeItem(at: profile) }
         process = nil; contextID = nil; active = nil; tabs.removeAll(); documents.removeAll()
         nodes.removeAll(); byBackend.removeAll(); dialog = nil; logs.removeAll()
-        if let profile { try? FileManager.default.removeItem(at: profile) }; profile = nil
+        profile = nil
     }
 
     private func start() async throws {
         if started { return }
         guard !AgentPause.shared.status.paused else { throw ActionError(AgentPause.refusal) }
         shutdown()
+        retiring.removeAll { entry in
+            guard !entry.process.isRunning else { return false }
+            try? FileManager.default.removeItem(at: entry.profile)
+            return true
+        }
+        guard retiring.count < 4 else { throw ActionError("Chrome is still closing earlier sessions; wait before retrying.") }
         guard FileManager.default.isExecutableFile(atPath: executable) else {
             throw ActionError("Chrome automation needs Google Chrome installed in Applications.")
         }
@@ -140,7 +174,7 @@ public actor ChromeBridge {
         child.terminationHandler = { _ in try? FileManager.default.removeItem(at: directory) }
         do { try child.run() } catch { shutdown(); throw ActionError("Could not start isolated Chrome.") }
         process = child
-        ChromeLifecycle.shared.install { if child.isRunning { child.terminate() }; try? FileManager.default.removeItem(at: directory) }
+        ChromeLifecycle.shared.install { if child.isRunning { child.terminate() } }
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         var endpoint: URL?
         while ContinuousClock.now < deadline, child.isRunning {
@@ -160,7 +194,6 @@ public actor ChromeBridge {
         transport = connection
         ChromeLifecycle.shared.install {
             connection.close(); if child.isRunning { child.terminate() }
-            try? FileManager.default.removeItem(at: directory)
         }
         do {
             let created = try await command("Target.createBrowserContext", ["disposeOnDetach": true])
@@ -172,9 +205,17 @@ public actor ChromeBridge {
 
     private func command(_ method: String, _ parameters: [String: Value] = [:], session: String? = nil) async throws -> Value {
         try Task.checkCancellation(); try AgentPause.permit?.check()
+        let generation = ChromeOperation.epoch
+        if let generation, generation != epoch { throw CancellationError() }
         guard let transport, process?.isRunning == true else { throw ActionError("Chrome automation ended; retry to start a fresh session.") }
-        do { return try await transport.request(method, parameters, sessionID: session) }
-        catch { shutdown(); throw error }
+        do {
+            let result = try await transport.request(method, parameters, sessionID: session)
+            if let generation, generation != epoch { throw CancellationError() }
+            return result
+        } catch {
+            if generation == nil || generation == epoch { shutdown() }
+            throw error
+        }
     }
 
     private func checkURL(_ url: String) async throws {

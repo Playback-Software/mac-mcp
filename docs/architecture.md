@@ -236,8 +236,10 @@ received frames to 16 MiB, and rejects non-finite, non-positive or excessively l
 0700 profile and incognito browser context. A random loopback DevTools endpoint is read from that profile; no
 existing debugging port or personal profile can be supplied through tools. CDP requests have bounded frames,
 pending-request counts and timeouts; turns serialize until the prior operation actually ends, including shutdown
-on cancellation. The person's pause closes Chrome's transport and terminates its process synchronously. An exit
-hook does the same when the agent exits. Profiles are removed on termination. Downloads are denied for the context,
+on cancellation. The person's pause closes Chrome's transport and signals its process synchronously. An exit
+hook does the same when the agent exits. Normal session cleanup waits for exit before removing profiles; abrupt
+process termination can require later cleanup. Late replies from an older generation cannot close a new session.
+Downloads are denied for the context,
 file choosers are intercepted without selecting files, and intercepted requests recheck current web/app policy.
 
 Page reads use bounded Accessibility trees; node identities include a random incarnation, target and document
