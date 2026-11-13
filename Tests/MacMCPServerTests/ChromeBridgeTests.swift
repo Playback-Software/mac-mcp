@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 import MacMCPCore
 @testable import MacMCPServer
@@ -8,6 +9,7 @@ private final class ChromeFixture: @unchecked Sendable {
     let fd: Int32
     let port: UInt16
     let finished = DispatchGroup()
+    private let stopped = Mutex(false)
     init() throws {
         let socketFD = socket(AF_INET, SOCK_STREAM, 0)
         fd = socketFD
@@ -22,7 +24,10 @@ private final class ChromeFixture: @unchecked Sendable {
         finished.enter()
         Thread { [self] in
             defer { finished.leave() }
-            while true {
+            while !stopped.withLock({ $0 }) {
+                var ready = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                guard poll(&ready, 1, 100) > 0 else { continue }
+                if stopped.withLock({ $0 }) { return }
                 let client = accept(fd, nil, nil)
                 guard client >= 0 else { return }
                 var noSignal: Int32 = 1
@@ -47,7 +52,12 @@ private final class ChromeFixture: @unchecked Sendable {
             }
         }.start()
     }
-    func close() { shutdown(fd, SHUT_RDWR); Darwin.close(fd) }
+    func close() {
+        stopped.withLock { $0 = true }
+        shutdown(fd, SHUT_RDWR)
+        finished.wait() // The listener must stop before this descriptor can be reused by another fixture.
+        Darwin.close(fd)
+    }
 }
 
 @Suite(.serialized) struct ChromeBridgeTests {
