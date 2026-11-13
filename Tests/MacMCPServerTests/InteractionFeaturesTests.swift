@@ -132,4 +132,20 @@ import MacMCPCore
         #expect(throws: (any Error).self) { try RelayOptions(["--require-consent", "--require-consent"]) }
     }
 
+    @Test func browserSelectionIsValidatedAndDoesNotLeakBetweenCalls() async throws {
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent("browser-audit-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: path) }
+        let calls = Probe()
+        let spec = ToolSpec(name: "web_probe", description: "test routing", annotations: .readOnly) { _, _ in
+            calls.add(AutomationBrowser.selection)
+            return .text(AutomationBrowser.selection)
+        }
+        let definition = MacMCPServer.definition(audit: AuditLog(path: path.path), tools: [spec])
+        let context = await Session().snapshot(version: nil, info: nil)
+        _ = await definition.call("web_probe", ["browser": "chrome"], context)
+        _ = await definition.call("web_probe", [:], context)
+        let invalid = await definition.call("web_probe", ["browser": "unknown"], context)
+        #expect(invalid.isError && calls.all == ["chrome", "safari"])
+        #expect(AutomationBrowser.selection == "safari")
+    }
 }

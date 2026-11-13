@@ -83,6 +83,8 @@ public struct ToolSpec: Sendable {
                 deadline: @escaping @Sendable (ToolArgs) -> TimeInterval = { _ in 30 },
                 mutates: (@Sendable (ToolArgs) -> Bool)? = nil,
                 handler: @escaping @Sendable (ToolArgs, ToolContext) async -> ToolOutput) {
+        var properties = properties
+        if name.hasPrefix("web_") { properties["browser"] = Prop.string("Default safari; chrome uses an isolated headless profile.", enum: ["safari", "chrome"]) }
         var schema: [String: Value] = ["type": "object", "properties": .object(properties)]
         if !required.isEmpty { schema["required"] = .array(required.map { .string($0) }) }
         tool = Tool(name: name, description: description, inputSchema: .object(schema), annotations: annotations, outputSchema: Tool.resultSchema)
