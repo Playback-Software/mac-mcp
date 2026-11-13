@@ -73,6 +73,10 @@ public struct Screenshot: Sendable {
     public let mapping: ScreenshotMapping
     public let subject: String
 
+    public init(id: String, image: CGImage, mapping: ScreenshotMapping, subject: String) {
+        self.id = id; self.image = image; self.mapping = mapping; self.subject = subject
+    }
+
     public func pngData() throws -> Data {
         guard let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
             throw CaptureError.failed("PNG encoding")

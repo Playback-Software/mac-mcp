@@ -101,8 +101,14 @@ private func perform(
         let after = try await ActionMetrics.during(.after) {
             try await actionSnapshot(req, allowMenubar: true) { try await Snapshotter.take($0, reusing: settle.finalWalk) }
         }
-        let text = await ActionMetrics.during(.report) {
+        var text = await ActionMetrics.during(.report) {
             await actionReport(summary: summary.text, settle: settle, before: before, after: after)
+        }
+        if name == "click", let row = resolved?.row, row.role == "button", !row.label.isEmpty,
+           let items = try? await Input.guardWork(pool: .route, timeout: 0.3, { MenuHints.exposed(pid: pid) }),
+           let path = MenuHints.matching(row.label, items: items) {
+            text += "\nA same-named menu command is available for next time: mac_menu path="
+                + Untrusted.inline(path.joined(separator: " > ")) + "."
         }
         return .text(text, auditDetail: actionAudit(resolved, app: app, summary))
     } catch {

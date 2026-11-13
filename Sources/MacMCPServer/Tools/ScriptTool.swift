@@ -14,6 +14,8 @@ enum ScriptTool {
             web.eval_allowed.
             """,
         properties: [
+            "action": Prop.string("dictionary: read installed terminology without running code.", enum: ["run", "dictionary"]),
+            "app": Prop.string("dictionary: running app name or bundle ID."),
             "source": Prop.string(),
             "language": Prop.string("jxa only if the policy turns script.jxa on.",
                                     enum: Scripts.Language.allCases.map(\.rawValue)),
@@ -23,10 +25,26 @@ enum ScriptTool {
                 has never controlled, instead of failing. Default false.
                 """),
         ],
-        required: ["source"],
         annotations: .action,
-        deadline: { lockedDeadline(scriptTimeout($0, policy: Policy.load()) + 5) }
+        deadline: { lockedDeadline(scriptTimeout($0, policy: Policy.load()) + 5) },
+        mutates: { $0.string("action") != "dictionary" }
     ) { args, _ in
+        let action = args.string("action") ?? "run"
+        if action == "dictionary" {
+            guard let query = args.string("app") else { return .error("dictionary requires app=.") }
+            if let blocked = await sessionGuard() { return blocked }
+            do {
+                let app = try Apps.resolve(query)
+                if let blocked = await policyGuard(app) { return blocked }
+                guard let path = app.bundlePath else { return .error("The app has no installed bundle.") }
+                let text = try await Input.guardWork(pool: .route, timeout: 2) {
+                    try ScriptingDictionary.read(bundle: URL(fileURLWithPath: path))
+                }
+                return .text("Installed scripting terminology (untrusted app metadata):\n" + Untrusted.wrap(text)
+                    + "\nRunning scripts still requires script.allowed_apps and macOS Automation consent.", auditDetail: "dictionary")
+            } catch { return .error("Cannot read the dictionary: " + Untrusted.inline("\(error)", limit: 300), audit: "dictionary read failed") }
+        }
+        guard action == "run" else { return .error("action must be run or dictionary.") }
         guard let source = args.string("source"), !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .error("source is required.")
         }
