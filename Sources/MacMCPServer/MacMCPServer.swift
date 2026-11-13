@@ -52,7 +52,9 @@ public enum MacMCPServer {
     static func definition(audit: AuditLog, tools: [ToolSpec], pause: AgentPause = .shared, claims: Claims = .shared) -> ServerDefinition {
         let byName = Dictionary(uniqueKeysWithValues: tools.map { ($0.tool.name, $0) })
         return ServerDefinition(name: "mac-mcp", version: version, instructions: instructions,
-                                tools: tools.map(\.tool)) { name, arguments, session in
+                                tools: tools.map(\.tool), mutates: { name, arguments in
+                                    byName[name]?.mutates(ToolArgs(arguments)) ?? false
+                                }) { name, arguments, session in
             let started = Date()
             let client = session.client
             let args = ToolArgs(arguments)
@@ -71,7 +73,7 @@ public enum MacMCPServer {
                         admission = try await claims.admit(name.hasPrefix("web_") ? "web" : "gui",
                             session: sessionID, client: client, origin: origin, token: session.leaseToken, leasePath: session.leasePath)
                     } else { admission = nil }
-                    let context = ToolContext(client: client, deadline: deadline)
+                    let context = ToolContext(client: client, connectionID: session.connectionID, deadline: deadline)
                     let who = "\(client) (\(origin ?? "direct socket"))"
                     let result: ToolOutput?
                     do {
@@ -127,7 +129,12 @@ public enum MacMCPServer {
                 detail: ToolAudit.detail(tool: name, raw: args.raw, secretKeys: spec.secretArguments, output: output),
                 durationMs: Int(Date().timeIntervalSince(started) * 1000),
                 session: sessionID, origin: origin, lease: leaseHolder))
-            return CallResult(content: (session.background ? [.text("Background mode: enabled.")] : []) + output.content, isError: output.isError)
+            let content: [Tool.Content] = (session.background ? [.text("Background mode: enabled.")] : []) + output.content
+            var structured: [String: Value] = ["ok": .bool(!output.isError), "text": .string(content.compactMap {
+                if case let .text(text) = $0 { return text }; return nil
+            }.joined(separator: "\n"))]
+            if let data = output.data { structured["data"] = .object(data) }
+            return CallResult(content: content, isError: output.isError, structuredContent: .object(structured))
         }
     }
 }

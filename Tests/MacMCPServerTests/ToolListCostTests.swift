@@ -8,7 +8,8 @@ import Testing
 /// writes the instructions and tools/list it measured there as JSON, for diffing wording changes.
 @Suite struct ToolListCostTests {
     /// tools/list as sent plus the instructions. Raise only with a reason: every byte is paid in every session.
-    static let budgetBytes = 20_480
+    // Structured result schemas are repeated per tool; browser and incremental-read options add the remainder.
+    static let budgetBytes = 26_624
 
     struct Cost {
         let name: String
@@ -20,7 +21,9 @@ import Testing
 
     /// What a client hands the model for a tool: name, description and schema (annotations only steer the client).
     static func modelFacing(_ tool: Tool) -> Value {
-        ["name": .string(tool.name), "description": .string(tool.description), "inputSchema": tool.inputSchema]
+        var value: [String: Value] = ["name": .string(tool.name), "description": .string(tool.description), "inputSchema": tool.inputSchema]
+        if let schema = tool.outputSchema { value["outputSchema"] = schema }
+        return .object(value)
     }
 
     @Test func toolListAndInstructionsStayWithinBudget() {

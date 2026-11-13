@@ -292,7 +292,14 @@ final class Probe: @unchecked Sendable {
         for (old, new) in zip(sdkList, ours) {
             let name = old["name"]?.stringValue ?? "?"
             #expect(new["annotations"] == old["annotations"], "\(name) annotations changed")
-            #expect(new["inputSchema"]?["required"] == old["inputSchema"]?["required"], "\(name) required params changed")
+            if name == "mac_script" {
+                // Source remains required by the run handler, but the new read-only dictionary action needs none.
+                #expect(old["inputSchema"]?["required"] == ["source"])
+                #expect(new["inputSchema"]?["required"] == nil)
+                #expect(new["inputSchema"]?["properties"]?["action"]?["enum"] == ["run", "dictionary"])
+            } else {
+                #expect(new["inputSchema"]?["required"] == old["inputSchema"]?["required"], "\(name) required params changed")
+            }
             for (param, schema) in old["inputSchema"]?["properties"]?.objectValue ?? [:] {
                 let now = new["inputSchema"]?["properties"]?[param]
                 #expect(now?["type"] == schema["type"], "\(name).\(param) changed type or was removed")

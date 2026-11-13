@@ -6,12 +6,14 @@ public struct Tool: Sendable {
     public let description: String
     public let inputSchema: Value
     public let annotations: Annotations
+    public let outputSchema: Value?
 
-    public init(name: String, description: String, inputSchema: Value, annotations: Annotations) {
+    public init(name: String, description: String, inputSchema: Value, annotations: Annotations, outputSchema: Value? = nil) {
         self.name = name
         self.description = description
         self.inputSchema = inputSchema
         self.annotations = annotations
+        self.outputSchema = outputSchema
     }
 
     /// Behaviour hints. Clients differ in how they treat missing ones (Codex assumes destructive), so every tool sets
@@ -55,9 +57,14 @@ public struct Tool: Sendable {
     }
 
     var json: Value {
-        ["name": .string(name), "description": .string(description), "inputSchema": inputSchema,
+        var value: [String: Value] = ["name": .string(name), "description": .string(description), "inputSchema": inputSchema,
          "annotations": annotations.json]
+        if let outputSchema { value["outputSchema"] = outputSchema }
+        return .object(value)
     }
+
+    public static let resultSchema: Value = ["type": "object", "properties": ["ok": ["type": "boolean"],
+        "text": ["type": "string"], "data": ["type": "object"]], "required": ["ok", "text"]]
 }
 
 /// JSON-RPC 2.0 error codes used by MCP.

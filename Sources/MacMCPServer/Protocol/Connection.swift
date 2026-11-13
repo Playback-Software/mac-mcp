@@ -9,6 +9,9 @@ public struct RequestContext: Sendable {
     public let origin: String?
     public let id: String
     public let background: Bool
+    public var connectionID: String = UUID().uuidString
+    public var requiresConsent = false
+    public var clientCapabilities: Value = [:]
     let leasePath: String
 
     init(client: String, protocolVersion: String?, leaseToken: String?, origin: String?, id: String,
@@ -36,14 +39,17 @@ public struct ServerDefinition: Sendable {
     public let version: String
     public let instructions: String
     public let tools: [Tool]
+    public let mutates: @Sendable (String, [String: Value]) -> Bool
     public let call: @Sendable (_ name: String, _ arguments: [String: Value], _ session: RequestContext) async -> CallResult
 
     public init(name: String, version: String, instructions: String, tools: [Tool],
+                mutates: (@Sendable (String, [String: Value]) -> Bool)? = nil,
                 call: @escaping @Sendable (String, [String: Value], RequestContext) async -> CallResult) {
         self.name = name
         self.version = version
         self.instructions = instructions
         self.tools = tools
+        self.mutates = mutates ?? { name, _ in tools.first { $0.name == name }?.annotations.readOnlyHint != true }
         self.call = call
     }
 }
@@ -51,9 +57,11 @@ public struct ServerDefinition: Sendable {
 public struct CallResult: Sendable {
     public var content: [Tool.Content]
     public var isError: Bool
-    public init(content: [Tool.Content], isError: Bool = false) {
+    public var structuredContent: Value?
+    public init(content: [Tool.Content], isError: Bool = false, structuredContent: Value? = nil) {
         self.content = content
         self.isError = isError
+        self.structuredContent = structuredContent
     }
 }
 
@@ -73,21 +81,28 @@ public actor Session {
     }
     /// Person-owned relay opt-in. Once enabled in the preamble, no MCP message can clear it.
     public private(set) var background = false
+    public private(set) var requiresConsent = false
     /// `local` or `ssh:<address>`, as the relay reported it; nil for clients that connect without the relay.
     public private(set) var origin: String?
     /// The relay's session id (stable across agent restarts), else one for this connection.
     public private(set) var id = AgentClient.newSessionID()
 
     private let leasePath: String
+    private let connectionID = UUID().uuidString
     private var labeled = false
     private var legacyClient = "unknown"
     private var legacyVersion: String?
+    private var legacyCapabilities: Value = [:]
     public init(leasePath: String = LeaseStore.defaultPath) { self.leasePath = leasePath }
 
     /// Snapshot before dispatch. Modern requests never inherit the identity of an earlier request.
-    func snapshot(version: String?, info: Value?) -> RequestContext {
-        RequestContext(client: version == nil ? legacyClient : Self.clientLabel(info), protocolVersion: version ?? legacyVersion,
+    func snapshot(version: String?, info: Value?, capabilities: Value? = nil) -> RequestContext {
+        var context = RequestContext(client: version == nil ? legacyClient : Self.clientLabel(info), protocolVersion: version ?? legacyVersion,
                 leaseToken: leaseToken, origin: origin, id: id, background: background, leasePath: leasePath)
+        context.connectionID = connectionID
+        context.requiresConsent = requiresConsent
+        context.clientCapabilities = version == nil ? legacyCapabilities : capabilities ?? [:]
+        return context
     }
 
     private static func clientLabel(_ info: Value?) -> String {
@@ -95,12 +110,13 @@ public actor Session {
         return [name, info?["version"]?.stringValue].compactMap { $0 }.joined(separator: " ")
     }
 
-    func negotiate(version: String, info: Value?) {
+    func negotiate(version: String, info: Value?, capabilities: Value = [:]) {
         legacyClient = Self.clientLabel(info)
         legacyVersion = version
         client = legacyClient
         labeled = true
         protocolVersion = version
+        legacyCapabilities = capabilities
     }
 
     func identifyOnce(_ info: Value?) {
@@ -119,6 +135,7 @@ public actor Session {
             guard parts.count == 2 else { continue }
             switch parts[0] {
             case "background": background = background || parts[1] == "true"
+            case "consent": requiresConsent = requiresConsent || parts[1] == "true"
             case "lease":
                 leaseToken = parts[1]
             case "origin": origin = parts[1]
@@ -180,6 +197,8 @@ public final class Connection: @unchecked Sendable {
     private let lock = NSLock()
     private var calls: [String: Task<Void, Never>] = [:]   // in-flight tools/call by canonical request id
     private var cancelled: Set<String> = []
+    private let consent = SessionConsent()
+    private var elicitations: [String: CheckedContinuation<Bool, Never>] = [:]
     private var readEnd = "?"   // how the reader stopped (read result and errno), for the log
 
     public init(fd: Int32, server: ServerDefinition, limits: Limits = Limits()) {
@@ -239,10 +258,14 @@ public final class Connection: @unchecked Sendable {
     }
 
     private func closeAdmission() {
-        lock.withLock {
+        let pending = lock.withLock { () -> ([Task<Void, Never>], [CheckedContinuation<Bool, Never>]) in
             closed = true
-            calls.values.forEach { $0.cancel() }
+            let pending = (Array(calls.values), Array(elicitations.values))
+            elicitations.removeAll()
+            return pending
         }
+        pending.0.forEach { $0.cancel() }
+        pending.1.forEach { $0.resume(returning: false) }
         input.close()
         writer.abort()
     }
@@ -293,7 +316,10 @@ public final class Connection: @unchecked Sendable {
         }
         let id = m["id"]
         guard let method = m["method"]?.stringValue else {
-            if id != nil, m["result"] != nil || m["error"] != nil { reply(nil); return }   // a response to a request we never send
+            if let id, m["result"] != nil || m["error"] != nil {
+                finishElicitation(Self.key(id), accepted: m["error"] == nil && SessionConsent.accepts(m["result"]))
+                reply(nil); return
+            }
             return send(error: RPCError.invalidRequest, "Invalid request: no method", id: id ?? .null, reply: reply)
         }
         let params = m["params"]?.objectValue ?? [:]
@@ -317,7 +343,7 @@ public final class Connection: @unchecked Sendable {
                             "Invalid params: _meta must include \(Self.metaClientCapabilitiesKey)", id: id, reply: reply)
             }
         }
-        let context = await session.snapshot(version: modern, info: meta[Self.metaClientInfoKey])
+        let context = await session.snapshot(version: modern, info: meta[Self.metaClientInfoKey], capabilities: meta[Self.metaClientCapabilitiesKey])
         await request(method, params, id: id, modern: modern != nil || method == "server/discover", context: context, reply: reply)
     }
 
@@ -342,7 +368,7 @@ public final class Connection: @unchecked Sendable {
         case "initialize":
             let requested = params["protocolVersion"]?.stringValue ?? ""
             let version = Self.handshakeVersions.contains(requested) ? requested : Self.latestHandshakeVersion
-            await session.negotiate(version: version, info: params["clientInfo"])
+            await session.negotiate(version: version, info: params["clientInfo"], capabilities: params["capabilities"] ?? [:])
             send(result: [
                 "protocolVersion": .string(version),
                 "capabilities": capabilities,
@@ -374,7 +400,26 @@ public final class Connection: @unchecked Sendable {
                 // 2026-07-28: an unknown tool is a protocol error (legacy clients get an isError result instead).
                 return send(error: RPCError.invalidParams, "Invalid params: unknown tool \(name)", id: id, reply: reply)
             }
-            startCall(name, arguments, id: id, modern: modern, context: context,
+            let needsConsent = context.requiresConsent && server.mutates(name, arguments)
+            if needsConsent {
+                let modes = context.clientCapabilities["elicitation"]?.objectValue
+                guard let modes, modes.isEmpty || modes["form"]?.objectValue != nil else {
+                    return send(result: deniedConsent, id: id, modern: modern, reply: reply)
+                }
+                if modern {
+                    switch await consent.modern(call: ["name": .string(name), "arguments": .object(arguments)],
+                        state: params["requestState"]?.stringValue, response: params["inputResponses"]?["consent"]) {
+                    case .allowed: break
+                    case let .challenge(result):
+                        var payload = result.objectValue ?? [:]
+                        payload["_meta"] = [Self.metaServerInfoKey: serverInfo]
+                        return reply(["jsonrpc": "2.0", "id": id, "result": .object(payload)])
+                    case .denied: return send(result: deniedConsent, id: id, modern: modern, reply: reply)
+                    }
+                }
+            }
+            startCall(name, arguments, id: id, modern: modern, context: context, needsConsent: needsConsent && !modern,
+                      progressToken: Self.progressToken(params["_meta"]?["progressToken"]),
                       bytes: Value.object(params).jsonData().count + id.jsonData().count, reply: reply)
         default:
             send(error: RPCError.methodNotFound, "Method not found: \(method)", id: id, reply: reply)
@@ -382,7 +427,7 @@ public final class Connection: @unchecked Sendable {
     }
 
     private func startCall(_ name: String, _ arguments: [String: Value], id: Value, modern: Bool,
-                           context: RequestContext, bytes: Int, reply: @escaping Reply) {
+                           context: RequestContext, needsConsent: Bool, progressToken: Value?, bytes: Int, reply: @escaping Reply) {
         let key = Self.key(id)
         let rejection: String? = lock.withLock {
             guard !closed else { return "Connection closed" }
@@ -398,12 +443,30 @@ public final class Connection: @unchecked Sendable {
                         self.cancelled.remove(key)
                     }
                 }
+                if needsConsent, !(await self.consent.authorize({ await self.askConsent() })) {
+                    if !Task.isCancelled { self.send(result: self.deniedConsent, id: id, reply: reply) }
+                    else { reply(nil) }
+                    return
+                }
+                guard !Task.isCancelled else { reply(nil); return }
+                let progress = progressToken.map { token in Task {
+                    for tick in 0..<128 {
+                        guard !Task.isCancelled else { return }
+                        self.write(["jsonrpc": "2.0", "method": "notifications/progress", "params": [
+                            "progressToken": token, "progress": .int(tick), "message": "Working"]])
+                        do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                    }
+                } }
                 let result = await server.call(name, arguments, context)
+                progress?.cancel()
+                await progress?.value
                 let suppressed = self.lock.withLock {
                     self.cancelled.contains(key) || self.closed || Task.isCancelled
                 }
                 guard !suppressed else { reply(nil); return }
-                self.send(result: ["content": .array(result.content.map(\.json)), "isError": .bool(result.isError)],
+                var payload: [String: Value] = ["content": .array(result.content.map(\.json)), "isError": .bool(result.isError)]
+                if let structured = result.structuredContent { payload["structuredContent"] = structured }
+                self.send(result: payload,
                           id: id, modern: modern, reply: reply)
             }
             return nil
@@ -412,6 +475,41 @@ public final class Connection: @unchecked Sendable {
     }
 
     private var capabilities: Value { ["tools": ["listChanged": false]] }
+    private var deniedConsent: [String: Value] { ["content": [["type": "text", "text": "Actions require the person's consent for this connection. Use a client supporting form elicitation, or ask the person to reconnect. No action ran."]], "isError": true] }
+
+    static func progressToken(_ value: Value?) -> Value? {
+        guard let value else { return nil }
+        if let string = value.stringValue {
+            guard string.utf8.count <= 128 else { return nil }
+            return value
+        }
+        guard value.doubleValue?.isFinite == true else { return nil }
+        return value
+    }
+
+    private func askConsent() async -> Bool {
+        let id: Value = .string("macmcp-consent-" + UUID().uuidString)
+        let key = Self.key(id)
+        return await withTaskCancellationHandler {
+            let timer = Task {
+                do { try await Task.sleep(for: .seconds(120)) } catch { return }
+                finishElicitation(key, accepted: false)
+            }
+            defer { timer.cancel() }
+            return await withCheckedContinuation { continuation in
+                let accepted = lock.withLock { () -> Bool in
+                    guard !closed, !Task.isCancelled else { return false }
+                    elicitations[key] = continuation; return true
+                }
+                if accepted { write(["jsonrpc": "2.0", "id": id, "method": "elicitation/create", "params": SessionConsent.form]) }
+                else { continuation.resume(returning: false) }
+            }
+        } onCancel: { self.finishElicitation(key, accepted: false) }
+    }
+
+    private func finishElicitation(_ key: String, accepted: Bool) {
+        lock.withLock { elicitations.removeValue(forKey: key) }?.resume(returning: accepted)
+    }
     private var serverInfo: Value { ["name": .string(server.name), "version": .string(server.version)] }
     private var supportedVersions: Value { .array((Self.statelessVersions + [Self.latestHandshakeVersion]).map(Value.string)) }
 
