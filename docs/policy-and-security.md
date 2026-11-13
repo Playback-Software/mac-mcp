@@ -199,6 +199,18 @@ MacMCP gives whoever can reach it control of the Mac's GUI. The socket is owner-
 listener, and remote access goes through SSH. Password-field values are never shown. Actions refuse to touch macOS
 security and permission prompts, and apps on the policy's deny list.
 
+### Connection consent
+
+A person may add `--require-consent` to a client's relay command. Read-only calls remain available, but its first
+mutating call needs a boolean form response through MCP elicitation. Consent is local to that socket connection;
+it is not derived from the relay's session label and is lost on reconnect or agent restart. A modern continuation
+is bound to the exact call, expires after 120 seconds and can be consumed only once. Unsupported form capability,
+decline, cancellation and disconnection do not dispatch the action. Forms request no credentials or screen text.
+
+This relies on the MCP client to present the form to a person. Approval allows that connection's actions under the
+existing policy and guards; it does not approve policy changes, grant Automation or other macOS permissions,
+resume a person's pause, bypass leases or lift background-mode restrictions. Tool arguments cannot turn it off.
+
 ### Background mode
 
 Background mode is a per-client restriction chosen by the person in the client's MCP command arguments:

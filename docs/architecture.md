@@ -153,6 +153,12 @@ the point worked out while it was in the background.
 
 ## Settling
 
+An advisory AX observer listens for focus, window, value, selection and layout changes on a dedicated run loop.
+An event resets the quiet period even when the signature is unchanged. With supported notifications, signature
+samples are 160 ms apart instead of 80 ms. Unsupported or lost observation falls back to 80 ms polling, and every
+successful settle still requires matching signatures. Observers are removed when the wait ends; an event counter
+alone never proves stability. This reduces redundant walks, not the required quiet interval.
+
 After an action, `Settle` samples a signature of what the agent would see (frontmost app, the target app's windows
 and bounds, pop-up menus, its focused element, and a hash of its focused window's rows) until it holds for 250 ms,
 or 2 s pass. Two samples of an unchanged UI must hash the same, so the row walk is bounded by a node count, never by
@@ -175,6 +181,17 @@ period are unchanged. `MAC_MCP_DEBUG_ACTIONS=1` enables per-action phase and wal
 see [development and testing](testing/development.md#action-measurements).
 
 ## Protocol layer
+
+Production tools declare a common output schema and return structured `ok`/marked `text` alongside the existing
+content blocks, with optional tool metadata. Progress tokens opt a request into bounded heartbeat notifications;
+the heartbeat task is cancelled and joined before the result is written. Connection consent is enforced before
+dispatch or GUI admission, separately from tool arguments. Legacy form requests are bounded and cancellable;
+modern forms use one-use, call-bound, connection-local continuation state. Neither path can approve policy or
+macOS permission changes. See [MCP results and session consent](tools.md#mcp-results-and-session-consent).
+
+Incremental snapshots retain at most 64 captures across connections, keyed by a fresh internal connection ID
+rather than a client-supplied relay label. Invalid baselines require a full snapshot; context changes render full
+state. Diff rendering marks only returned refs as shown, and incomplete reads cannot claim disappearance.
 
 The agent speaks both protocol eras on every connection:
 
@@ -215,7 +232,20 @@ received frames to 16 MiB, and rejects non-finite, non-positive or excessively l
 
 ## Web tools
 
-The `web_*` tools drive a **separate automation Safari** through Safari 27's own MCP server (`/usr/bin/safarimcp`).
+`browser=chrome` selects a CDP backend instead of Safari. It launches only its own headless Chrome with a fresh
+0700 profile and incognito browser context. A random loopback DevTools endpoint is read from that profile; no
+existing debugging port or personal profile can be supplied through tools. CDP requests have bounded frames,
+pending-request counts and timeouts; turns serialize until the prior operation actually ends, including shutdown
+on cancellation. The person's pause closes Chrome's transport and terminates its process synchronously. An exit
+hook does the same when the agent exits. Profiles are removed on termination. Downloads are denied for the context,
+file choosers are intercepted without selecting files, and intercepted requests recheck current web/app policy.
+
+Page reads use bounded Accessibility trees; node identities include a random incarnation, target and document
+loader. Navigation drops their mapping. DOM operations use an isolated JavaScript world, with verified text edits,
+visible bounds and hit checks for clicks. Only `web_eval` accepts caller-supplied code, under `web.eval_allowed`.
+See [Tools](tools.md#chrome-automation) for the supported routes and limits.
+
+By default, `web_*` tools drive a **separate automation Safari** through Safari 27's own MCP server (`/usr/bin/safarimcp`).
 It has a clean profile, with no logins and with cookies that last only for the agent's session, and it never touches
 your Safari windows. A person must turn on Safari ▸ Settings ▸ Developer ▸ "Allow remote automation and external
 agents" once. The Developer tab appears after Settings ▸ Advanced ▸ "Show features for web developers". For a site

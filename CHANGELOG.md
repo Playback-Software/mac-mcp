@@ -7,6 +7,15 @@ MacMCP is in early development, so tools and policy keys may change before 1.0.
 
 ### Added
 
+- Local scripting-dictionary discovery with `mac_script action=dictionary app=`, without running code or requesting
+  Automation permission. Click results can suggest an unambiguous, already-exposed same-named menu command.
+- `mac_snapshot since=sN` for changes since a retained snapshot on the same connection, and
+  `mac_screenshot app=... annotate=true` for images labelled with existing accessibility refs.
+- Structured MCP results alongside text/images, opt-in progress notifications, and person-configured
+  `--require-consent` for connection-local action consent through form elicitation.
+- `browser=chrome` on `web_*`: a fresh headless Google Chrome profile and incognito context, with web policy checks,
+  verified form typing, session-local node IDs, disabled downloads and no local-file uploads.
+
 - Per-client `mac-mcp --background` opt-in: AX actions and verified text writes, guarded PID-targeted keys,
   nonactivating app launches and window-filter screenshots/OCR. Pointer/foreground fallbacks and unsupported
   guard contexts refuse; instructions, tool results and `mac_doctor` identify the mode.
@@ -27,6 +36,9 @@ MacMCP is in early development, so tools and policy keys may change before 1.0.
 - README sections for a first task, updating and uninstalling.
 
 ### Changed
+
+- Settling listens for accessibility changes and samples less often when notifications are supported. Signature
+  verification and polling remain the fallback; notifications alone never prove that the UI is settled.
 
 - `mac_snapshot` output over its budget keeps controls ahead of text, keeps the focused and selected rows and the
   window's bottom controls, collapses runs of similar list rows, and marks each gap.
