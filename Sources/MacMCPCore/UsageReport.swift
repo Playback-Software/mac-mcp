@@ -123,7 +123,8 @@ public enum UsageReport {
         out.append("Slowest calls:")
         for e in real.sorted(by: { $0.durationMs > $1.durationMs }).prefix(5) {
             out.append("  \(duration(e.durationMs))  \(e.tool) \(e.outcome)  \(f.string(from: e.time))"
-                + (e.detail.map { "  " + String($0.prefix(80)) } ?? ""))
+                + (e.detail.map { "  " + String($0.components(separatedBy: .whitespacesAndNewlines)
+                    .filter { !$0.isEmpty }.joined(separator: " ").prefix(80)) } ?? ""))
         }
 
         out.append("")

@@ -39,6 +39,14 @@ import Testing
         #expect(a == b && a.contains("eN") && !a.contains("Call mac_snapshot"))
     }
 
+    @Test func multilineDetailsCannotBreakSlowCallRows() {
+        let report = UsageReport.render([entry("mac_click", "error", detail: "first line\nsecond\tline", ms: 2000)],
+                                        since: t0, now: t0.addingTimeInterval(120))
+        let slow = report.components(separatedBy: "Slowest calls:\n")[1].components(separatedBy: "\n\n")[0]
+        #expect(slow.split(separator: "\n").count == 1)
+        #expect(slow.contains("first line second line"))
+    }
+
     @Test func reportSummarisesOnlyRealSessions() {
         let entries = [
             entry("mac_snapshot"), entry("mac_click"), entry("mac_menu", ms: 2500),
