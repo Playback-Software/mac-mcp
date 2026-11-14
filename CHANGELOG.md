@@ -59,6 +59,8 @@ MacMCP is in early development, so tools and policy keys may change before 1.0.
 
 ### Fixed
 
+- Accessibility notifications count quiet time from delivery, and settle polling stops at the remaining quiet
+  interval, avoiding unnecessary delay after an action.
 - `mac_script` refused every allowed app that had a window on macOS 27: its open-documents check required the window
   server and Accessibility to list the same number of windows, and macOS 27 adds offscreen helper windows to every
   app. The check now matches each window to its Accessibility element by window ID, and skips only offscreen helper

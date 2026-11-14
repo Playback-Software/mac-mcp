@@ -30,10 +30,13 @@ final class AXChanges: @unchecked Sendable {
     }
     private let lock = NSLock()
     private var count: UInt64 = 0
+    private var lastChange: ContinuousClock.Instant?
     private var observing = false
     private var stopped = false
     private var loop: CFRunLoop?
     var generation: UInt64? { lock.withLock { observing ? count : nil } }
+
+    var lastEvent: ContinuousClock.Instant? { lock.withLock { lastChange } }
 
     init(pid: pid_t) {
         let thread = Thread { [self] in
@@ -41,7 +44,7 @@ final class AXChanges: @unchecked Sendable {
             guard AXObserverCreate(pid, { _, _, _, context in
                 guard let context else { return }
                 let changes = Unmanaged<AXChanges>.fromOpaque(context).takeUnretainedValue()
-                changes.lock.withLock { changes.count &+= 1 }
+                changes.lock.withLock { changes.count &+= 1; changes.lastChange = .now }
             }, &observer) == .success, let observer else { return }
             let app = AXElement.application(pid: pid, timeout: 0.1)
             let notifications = Self.registry.names

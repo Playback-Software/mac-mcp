@@ -73,6 +73,21 @@ import Testing
         #expect(!result.settled)
     }
 
+    @Test func delayedObservationUsesTheNotificationTimeInsteadOfThePollTime() async {
+        let generation = Mutex<UInt64>(0)
+        let delivered = Mutex<ContinuousClock.Instant?>(nil)
+        var samples = 0
+        let result = await Settle.wait(quiet: 250, timeout: 2,
+            events: { generation.withLock { $0 } }, lastEvent: { delivered.withLock { $0 } }) {
+                samples += 1
+                if samples == 1 { delivered.withLock { $0 = .now } }
+                if samples == 2 { generation.withLock { $0 = 1 } }
+                return 7
+            }
+        #expect(result.settled)
+        #expect(samples <= 3, "An already-delivered notification must not restart the quiet period at a later poll")
+    }
+
     @Test func observerModeStillSamplesAndFallsBackWhenUnsupported() async {
         var eventSamples = 0, fallbackSamples = 0
         let observed = await Settle.wait(quiet: 250, timeout: 2, events: { 0 }) { eventSamples += 1; return 7 }

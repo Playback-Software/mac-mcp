@@ -154,7 +154,8 @@ the point worked out while it was in the background.
 ## Settling
 
 An advisory AX observer listens for focus, window, value, selection and layout changes on a dedicated run loop.
-An event resets the quiet period even when the signature is unchanged. With supported notifications, signature
+An event resets the quiet period from its monotonic delivery time even when the signature is unchanged. The next
+sample is capped at the remaining quiet interval, so a late poll does not add another full interval. With supported notifications, signature
 samples are 160 ms apart instead of 80 ms. Unsupported or lost observation falls back to 80 ms polling, and every
 successful settle still requires matching signatures. A bounded cache reuses observers for up to eight processes,
 checks process launch identity and stops observers on eviction. Notification names have stable CFString storage
