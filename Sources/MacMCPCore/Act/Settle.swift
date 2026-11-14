@@ -83,8 +83,7 @@ public enum Settle {
     }
 
     public static func wait(pid: pid_t, quiet: Int = 250, timeout: TimeInterval = 2.0) async -> Result {
-        let changes = AXChanges(pid: pid)
-        defer { changes.stop() }
+        let changes = AXChanges.forApp(pid)
         return await wait(pid: pid, quiet: quiet, timeout: timeout, events: { changes.generation }) { budget, timeLimit in
             signature(pid: pid, nodeBudget: budget, timeLimit: timeLimit)
         }

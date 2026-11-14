@@ -1,8 +1,33 @@
 import ApplicationServices
 import Foundation
+import AppKit
 
 /// An advisory event counter. Missing or unsupported notifications never replace signature verification.
 final class AXChanges: @unchecked Sendable {
+    private final class Registry: @unchecked Sendable {
+        let lock = NSLock()
+        // Keep the bridged CFStrings alive: remote observer registration can finish asynchronously.
+        let names: [CFString] = [kAXFocusedWindowChangedNotification, kAXFocusedUIElementChangedNotification,
+            kAXWindowCreatedNotification, kAXUIElementDestroyedNotification, kAXValueChangedNotification,
+            kAXSelectedChildrenChangedNotification, kAXLayoutChangedNotification].map { $0 as CFString }
+        var entries: [pid_t: (Date?, AXChanges)] = [:]
+        var order: [pid_t] = []
+    }
+    private static let registry = Registry()
+    static func forApp(_ pid: pid_t) -> AXChanges {
+        let birth = NSRunningApplication(processIdentifier: pid)?.launchDate
+        return registry.lock.withLock {
+            if let (date, observer) = registry.entries[pid], date == birth { return observer }
+            registry.entries.removeValue(forKey: pid)?.1.stop()
+            registry.order.removeAll { $0 == pid }
+            let observer = AXChanges(pid: pid)
+            registry.entries[pid] = (birth, observer); registry.order.append(pid)
+            while registry.order.count > 8 {
+                registry.entries.removeValue(forKey: registry.order.removeFirst())?.1.stop()
+            }
+            return observer
+        }
+    }
     private let lock = NSLock()
     private var count: UInt64 = 0
     private var observing = false
@@ -19,18 +44,16 @@ final class AXChanges: @unchecked Sendable {
                 changes.lock.withLock { changes.count &+= 1 }
             }, &observer) == .success, let observer else { return }
             let app = AXElement.application(pid: pid, timeout: 0.1)
-            let notifications = [kAXFocusedWindowChangedNotification, kAXFocusedUIElementChangedNotification,
-                kAXWindowCreatedNotification, kAXUIElementDestroyedNotification, kAXValueChangedNotification,
-                kAXSelectedChildrenChangedNotification, kAXLayoutChangedNotification]
+            let notifications = Self.registry.names
             let context = Unmanaged.passUnretained(self).toOpaque()
-            let registered = notifications.filter { AXObserverAddNotification(observer, app.raw, $0 as CFString, context) == .success }
+            let registered = notifications.filter { AXObserverAddNotification(observer, app.raw, $0, context) == .success }
             guard !registered.isEmpty else { return }
             let runLoop = CFRunLoopGetCurrent()
             let source = AXObserverGetRunLoopSource(observer)
             CFRunLoopAddSource(runLoop, source, .defaultMode)
             let run = lock.withLock { () -> Bool in loop = runLoop; observing = true; return !stopped }
             if run { CFRunLoopRun() }
-            for name in registered { AXObserverRemoveNotification(observer, app.raw, name as CFString) }
+            for name in registered { AXObserverRemoveNotification(observer, app.raw, name) }
             CFRunLoopRemoveSource(runLoop, source, .defaultMode)
             lock.withLock { loop = nil; observing = false }
         }

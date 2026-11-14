@@ -224,7 +224,8 @@ extension Integration {
         #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("one.txt").path))
         #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("two.txt").path))
         // Navigation alone still goes.
-        #expect(!(try agent().call("mac_key", ["app": "Finder", "keys": "down down"])).isError)
+        let navigation = try agent().call("mac_key", ["app": "Finder", "keys": "down down"])
+        #expect(!navigation.isError, "\(navigation.text)")
     }
 
     /// Finder's selection keys go with a readable, safe selection, an empty one included.

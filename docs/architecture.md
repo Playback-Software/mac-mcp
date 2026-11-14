@@ -156,7 +156,9 @@ the point worked out while it was in the background.
 An advisory AX observer listens for focus, window, value, selection and layout changes on a dedicated run loop.
 An event resets the quiet period even when the signature is unchanged. With supported notifications, signature
 samples are 160 ms apart instead of 80 ms. Unsupported or lost observation falls back to 80 ms polling, and every
-successful settle still requires matching signatures. Observers are removed when the wait ends; an event counter
+successful settle still requires matching signatures. A bounded cache reuses observers for up to eight processes,
+checks process launch identity and stops observers on eviction. Notification names have stable CFString storage
+for asynchronous registration. An event counter
 alone never proves stability. This reduces redundant walks, not the required quiet interval.
 
 After an action, `Settle` samples a signature of what the agent would see (frontmost app, the target app's windows
