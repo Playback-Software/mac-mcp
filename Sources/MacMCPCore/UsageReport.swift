@@ -21,6 +21,7 @@ public enum UsageReport {
     public static func kind(_ e: AuditEntry) -> Kind {
         if e.lease != nil { return .leased }
         let client = e.client.lowercased()
+        if client == "probe" || client.hasPrefix("probe ") { return .test }
         if testClients.contains(where: client.hasPrefix) { return .test }
         if client.hasPrefix("mac-mcp-cli") { return .cli }
         if e.session == nil { return .legacy }

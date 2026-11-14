@@ -17,6 +17,9 @@ import Testing
         #expect(UsageReport.kind(entry("mac_click", lease: "eval-run")) == .leased)
         #expect(UsageReport.kind(entry("mac_click", client: "integration-tests 1")) == .test)
         #expect(UsageReport.kind(entry("mac_click", client: "soak-0 soak")) == .test)
+        #expect(UsageReport.kind(entry("mac_click", client: "probe 1")) == .test)
+        #expect(UsageReport.kind(entry("mac_click", client: "probe")) == .test)
+        #expect(UsageReport.kind(entry("mac_click", client: "ProbeStudio 1")) == .real)
         #expect(UsageReport.kind(entry("mac_doctor", client: "mac-mcp-cli 0.1.0")) == .cli)
         #expect(UsageReport.kind(entry("mac_click", session: nil, origin: nil)) == .legacy)
     }
