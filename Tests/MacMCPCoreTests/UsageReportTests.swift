@@ -17,6 +17,9 @@ import Testing
         #expect(UsageReport.kind(entry("mac_click", lease: "eval-run")) == .leased)
         #expect(UsageReport.kind(entry("mac_click", client: "integration-tests 1")) == .test)
         #expect(UsageReport.kind(entry("mac_click", client: "soak-0 soak")) == .test)
+        #expect(UsageReport.kind(entry("mac_click", client: "probe 1")) == .test)
+        #expect(UsageReport.kind(entry("mac_click", client: "probe")) == .test)
+        #expect(UsageReport.kind(entry("mac_click", client: "ProbeStudio 1")) == .real)
         #expect(UsageReport.kind(entry("mac_doctor", client: "mac-mcp-cli 0.1.0")) == .cli)
         #expect(UsageReport.kind(entry("mac_click", session: nil, origin: nil)) == .legacy)
     }
@@ -34,6 +37,14 @@ import Testing
         let a = UsageReport.cluster("Ref e293 (button \"OK\") no longer exists: the UI changed. Call mac_snapshot.")
         let b = UsageReport.cluster("Ref e17 (button \"Cancel\") no longer exists: the UI changed. Call mac_snapshot.")
         #expect(a == b && a.contains("eN") && !a.contains("Call mac_snapshot"))
+    }
+
+    @Test func multilineDetailsCannotBreakSlowCallRows() {
+        let report = UsageReport.render([entry("mac_click", "error", detail: "first line\nsecond\tline", ms: 2000)],
+                                        since: t0, now: t0.addingTimeInterval(120))
+        let slow = report.components(separatedBy: "Slowest calls:\n")[1].components(separatedBy: "\n\n")[0]
+        #expect(slow.split(separator: "\n").count == 1)
+        #expect(slow.contains("first line second line"))
     }
 
     @Test func reportSummarisesOnlyRealSessions() {

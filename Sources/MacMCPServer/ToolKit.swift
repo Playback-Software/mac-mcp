@@ -31,11 +31,13 @@ public struct ToolOutput: Sendable {
     public var isError: Bool
     /// Short note for the audit log (e.g. what was clicked), so the log stays readable without full output.
     public var auditDetail: String?
+    public var data: [String: Value]?
 
-    public init(content: [Tool.Content], isError: Bool = false, auditDetail: String? = nil) {
+    public init(content: [Tool.Content], isError: Bool = false, auditDetail: String? = nil, data: [String: Value]? = nil) {
         self.content = content
         self.isError = isError
         self.auditDetail = auditDetail
+        self.data = data
     }
 
     public static func text(_ text: String, auditDetail: String? = nil) -> ToolOutput {
@@ -53,6 +55,7 @@ public struct ToolOutput: Sendable {
 
 public struct ToolContext: Sendable {
     public let client: String
+    public var connectionID: String = UUID().uuidString
     /// The call's deadline in seconds (from its ToolSpec), for tools that bound their own work by it.
     public var deadline: TimeInterval = 30
 }
@@ -80,9 +83,11 @@ public struct ToolSpec: Sendable {
                 deadline: @escaping @Sendable (ToolArgs) -> TimeInterval = { _ in 30 },
                 mutates: (@Sendable (ToolArgs) -> Bool)? = nil,
                 handler: @escaping @Sendable (ToolArgs, ToolContext) async -> ToolOutput) {
+        var properties = properties
+        if name.hasPrefix("web_") { properties["browser"] = Prop.string("Default safari; chrome uses an isolated headless profile.", enum: ["safari", "chrome"]) }
         var schema: [String: Value] = ["type": "object", "properties": .object(properties)]
         if !required.isEmpty { schema["required"] = .array(required.map { .string($0) }) }
-        tool = Tool(name: name, description: description, inputSchema: .object(schema), annotations: annotations)
+        tool = Tool(name: name, description: description, inputSchema: .object(schema), annotations: annotations, outputSchema: Tool.resultSchema)
         self.secretArguments = secretArguments
         self.scrubArguments = scrubArguments
         self.deadline = deadline

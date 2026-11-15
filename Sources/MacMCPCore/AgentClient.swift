@@ -32,9 +32,10 @@ public final class AgentClient {
 
     /// The line a client sends before any JSON-RPC: a GUI lease token (see `Lease`), and for the relay, where the
     /// session comes from and a session id that stays the same across agent restarts (for the usage report).
-    public static func directive(lease: String?, origin: String? = nil, session: String? = nil, background: Bool = false) -> Data? {
+    public static func directive(lease: String?, origin: String? = nil, session: String? = nil, background: Bool = false,
+                                 requiresConsent: Bool = false) -> Data? {
         let fields = [lease.map { "lease=\($0)" }, origin.map { "origin=\($0)" }, session.map { "session=\($0)" },
-                      background ? "background=true" : nil]
+                      background ? "background=true" : nil, requiresConsent ? "consent=true" : nil]
             .compactMap { $0 }
         return fields.isEmpty ? nil : Data(("#mac-mcp " + fields.joined(separator: " ") + "\n").utf8)
     }

@@ -57,7 +57,7 @@ clicked e6 button "Submit" (accessibility press) · settled in 457 ms
 - **Works over SSH.** `ssh my-mac ~/.local/bin/mac-mcp` gives a remote agent the same tools. Several sessions can connect; only one
   drives the GUI at a time.
 - **More than clicks.** Menu commands by path, AppleScript in apps you allow, your Shortcuts, OCR for canvases, and
-  `web_*` tools for a separate automation Safari.
+  `web_*` tools for a separate automation Safari or headless Chrome.
 - **Safe and self-diagnosing.** A per-machine policy, an audit log, deadlines on every call, and `mac-mcp doctor`
   for problems and their fixes. See [Safety](#safety).
 
@@ -69,7 +69,7 @@ clicked e6 button "Submit" (accessibility press) · settled in 457 ms
 | Act | `mac_click`, `mac_type`, `mac_key`, `mac_scroll`, `mac_drag`, `mac_hover` |
 | Direct routes | `mac_menu`, `mac_script`, `mac_shortcut`, `mac_clipboard` |
 | Apps and windows | `mac_app`, `mac_window`, `mac_doctor` |
-| Web (Safari) | `web_navigate`, `web_read`, `web_act`, `web_tabs`, `web_dialog`, `web_logs`, `web_eval` |
+| Web (Safari / Chrome) | `web_navigate`, `web_read`, `web_act`, `web_tabs`, `web_dialog`, `web_logs`, `web_eval` |
 
 The [tool reference](docs/tools.md) describes each one.
 
@@ -77,8 +77,9 @@ The [tool reference](docs/tools.md) describes each one.
 
 - macOS 26 or later on Apple silicon, and Xcode 26 or later (Swift 6.1+) to build.
 - A person logged in at the Mac's console with the screen unlocked while agents work. Screen Sharing is fine.
-- For the `web_*` tools: Safari 27, with Safari ▸ Settings ▸ Developer ▸ "Allow remote automation and external
+- For Safari-backed `web_*` tools: Safari 27, with Safari ▸ Settings ▸ Developer ▸ "Allow remote automation and external
   agents" turned on once. The Developer tab appears after Settings ▸ Advanced ▸ "Show features for web developers".
+- Alternatively, Google Chrome installed in `/Applications`, with `browser=chrome` on each web call.
 - Any stdio MCP client, such as [Claude Code](https://code.claude.com/docs/en/mcp).
 
 ## Quick start
@@ -132,6 +133,10 @@ For work alongside the person using the Mac, add `--background` to this client's
 example, `"args": ["--background"]`). This opt-in uses accessibility actions and app-targeted keys without activating
 apps or moving the pointer, and captures app windows even when covered. Unsupported input is refused; only the
 person can change the client configuration. `mac_doctor` and tool results show the mode; it is off by default.
+
+For a connection that asks before its first action, add `--require-consent`. A compatible MCP client presents the
+consent form; declining or lacking form support leaves actions blocked. Approval lasts only for that connection
+and does not change policy or macOS permissions. Read-only calls remain available.
 
 ### Claude Code plugin
 

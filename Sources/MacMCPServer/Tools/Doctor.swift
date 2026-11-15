@@ -105,13 +105,16 @@ enum DoctorTool {
         lines.append("")
         lines.append("Web (web_* tools: Safari's automation browser via \(SafariBridge.executable))")
         if !FileManager.default.isExecutableFile(atPath: SafariBridge.executable) {
-            lines.append("  !!  \(SafariBridge.executable) missing: web_* needs Safari 27 or later")
+            lines.append("      \(SafariBridge.executable) missing: the default Safari backend needs Safari 27 or later")
         } else if let s = SafariBridge.shared.status {
             lines.append("  OK  session running (safarimcp pid \(s.pid), since \(s.since.formatted(date: .omitted, time: .shortened)))")
         } else {
             lines.append("      no session yet (starts on the first web_* call; needs Safari ▸ Settings ▸ Developer ▸ "
                 + "\"Allow remote automation and external agents\")")
         }
+        lines.append(FileManager.default.isExecutableFile(atPath: ChromeBridge.executable)
+            ? "  OK  Google Chrome installed: browser=chrome uses a fresh headless profile"
+            : "      optional Chrome backend unavailable: install Google Chrome in Applications")
         if case let .success(p) = policy.enforced {
             func list(_ l: [String]) -> String { l.isEmpty ? "none" : l.joined(separator: ", ") }
             lines.append("      \(p.web.enabled ? "enabled" : "DISABLED by policy") · web_eval \(p.web.evalAllowed ? "allowed" : "off")"

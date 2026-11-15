@@ -23,6 +23,18 @@ Run `swift` with full Xcode selected (`DEVELOPER_DIR=/Applications/Xcode.app/Con
 `xcode-select -s`): TestHost uses SwiftUI macros that the Command Line Tools can't build. The scripts select Xcode
 themselves.
 
+## Headless Chrome tests
+
+The isolated Chrome backend has a headless end-to-end test, separate from tests of the installed GUI agent:
+
+```bash
+MAC_MCP_CHROME_TEST=1 swift test --skip IntegrationTests --filter ChromeBridgeTests
+```
+
+It needs Google Chrome in `/Applications`, serves a loopback-only fixture and injects a test policy without editing
+the machine's policy. It checks verified form actions, screenshots, stale IDs and blocked file/host routes, then
+terminates its own browser and removes its temporary profile. No Accessibility or Screen Recording grant is needed.
+
 ## Action measurements
 
 `scripts/measure-actions.py` measures the installed agent against the installed MacMCPTestHost. Run it only when

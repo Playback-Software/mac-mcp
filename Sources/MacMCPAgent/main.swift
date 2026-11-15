@@ -26,7 +26,7 @@ catch { log("Cannot start MacMCP: \(error)"); exit(1) }
 let audit = AuditLog()
 
 let server = MacMCPServer.definition(audit: audit)
-let controls = PersonControl(stopAdditionalWork: { SafariBridge.shared.stop() }) { event, message in
+let controls = PersonControl(stopAdditionalWork: { SafariBridge.shared.stop(); ChromeBridge.stopRunning() }) { event, message in
     log(message)
     Task.detached {
         await audit.record(AuditEntry(client: "person", tool: "person_" + event, arguments: [:],

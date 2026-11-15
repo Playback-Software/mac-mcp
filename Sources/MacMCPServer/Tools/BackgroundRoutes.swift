@@ -4,7 +4,7 @@ import MacMCPCore
 /// These tools can dispatch work outside the AX/input adapters (including launching Safari on a read). Their
 /// effects cannot be constrained to a background app. The person chooses a foreground connection for that work.
 func backgroundRefusal(tool: String, args: ToolArgs) -> String? {
-    if tool.hasPrefix("web_") || tool == "mac_script" || tool == "mac_shortcut" && args.string("action") != "list" {
+    if tool.hasPrefix("web_") || tool == "mac_script" && args.string("action") != "dictionary" || tool == "mac_shortcut" && args.string("action") != "list" {
         return BackgroundMode.refusal("run " + tool + " with unconstrained app or input effects")
     }
     switch tool {

@@ -49,6 +49,7 @@ public struct SnapshotResult: Sendable {
     public var stats = WalkStats()
     /// The rows actually rendered in `text`, excluding collapsed and budget-omitted rows.
     public var shownRows: [Row] = []
+    public var root: AXElement? = nil
     public var shownRefs: [String] { shownRows.compactMap(\.ref) }
 
     /// A header must not introduce a ref whose label the response doesn't show (diffs and waits show subsets).
@@ -217,7 +218,7 @@ public enum Snapshotter {
             "--- \(rows.count) rows (\(interactive) with refs) · \(stats.visited) nodes in \(stats.milliseconds) ms",
         ] + (body.isEmpty ? ["(no elements)"] : body.components(separatedBy: "\n"))
         return SnapshotResult(snapshot: snapshot, app: app, windowTitle: windowTitle, focusRef: focusRef,
-                              blockers: blockers, rows: rows, lines: lines, notes: notes, stats: stats, shownRows: shownRows)
+                              blockers: blockers, rows: rows, lines: lines, notes: notes, stats: stats, shownRows: shownRows, root: root)
     }
 
     /// Shared by live snapshots and unit fixtures; bookkeeping requests leave every unreturned ref unshown.

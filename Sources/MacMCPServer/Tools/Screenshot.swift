@@ -17,6 +17,7 @@ enum ScreenshotTool {
             "ocr": Prop.boolean(),
             "find": Prop.string("ocr: only lines containing this (case-insensitive)."),
             "image": Prop.boolean("ocr: also return the image."),
+            "annotate": Prop.boolean("app= only: label visible controls with AX refs."),
         ],
         annotations: .readOnly,
         // The recognizer's first load on a machine (again after an OS update) takes about a minute; the agent warms it
@@ -33,6 +34,8 @@ enum ScreenshotTool {
             if args.string("app") != nil { return .error("Pass app or display, not both.") }
         }
         let ocr = args.bool("ocr") ?? false
+        let annotate = args.bool("annotate") ?? false
+        if annotate && (args.string("app") == nil || ocr) { return .error("annotate=true requires app= and ocr=false.") }
         var req = Capture.Request()
         // Text recognition wants every native pixel; the image (if returned) is scaled the same, so keep it modest.
         req.maxEdge = ocr && args.int("max_edge") == nil ? 2560 : min(max(args.int("max_edge") ?? 1280, 200), 2560)
@@ -57,7 +60,24 @@ enum ScreenshotTool {
             req.region = CGRect(x: parts[0], y: parts[1], width: parts[2], height: parts[3])
         }
         do {
-            let shot = try await Capture.take(req)
+            var shot = try await Capture.take(req)
+            var legend = ""
+            if annotate, let app = req.app {
+                var snapshotRequest = SnapshotRequest(); snapshotRequest.pid = app.pid
+                let snapshot = try await Snapshotter.take(snapshotRequest)
+                guard let root = snapshot.root, let window = shot.mapping.window,
+                      ScreenshotMarks.windowID(of: root) == window.id,
+                      shot.mapping.staleReason(id: shot.id, windows: WindowServer.onScreenWindows()) == nil else {
+                    return .error("The captured window changed during annotation. Take another mac_screenshot.")
+                }
+                let marks = ScreenshotMarks.select(rows: snapshot.rows, mapping: shot.mapping)
+                let refs = Set(marks.map(\.ref))
+                let shown = snapshot.rows.filter { $0.ref.map(refs.contains) ?? false }
+                shot = Screenshot(id: shot.id, image: try ScreenshotMarks.draw(marks, on: shot.image), mapping: shot.mapping, subject: shot.subject)
+                await RefStore.shared.markShown(shown)
+                legend = "\nLabels are AX refs, usable with mac_click ref=; positions are not proof of visibility.\n"
+                    + Untrusted.wrap(lines: shown.map { $0.render(frames: false) })
+            }
             let m = shot.mapping
             // The image can't carry marks, so the sentence says what the pixels are.
             let clickHint = BackgroundMode.enabled ? "Background mode: pixels are for observation; use AX refs to act."
@@ -75,7 +95,7 @@ enum ScreenshotTool {
                 return ToolOutput(content: content, auditDetail: "\(shot.id) ocr \(lines.count) lines")
             }
             return ToolOutput(content: [
-                .text(summary),
+                .text(summary + legend),
                 .image(base64: try shot.pngData().base64EncodedString(), mimeType: "image/png"),
             ], auditDetail: "\(shot.id) \(m.pixelSize.width.safeInt)x\(m.pixelSize.height.safeInt)")
         } catch {

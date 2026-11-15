@@ -9,7 +9,7 @@ Refused: Paused by a person. Ask a person to run `mac-mcp resume` in Terminal.
 Calls stopped after starting instead say: "Stopped by a person's pause after this call started; it may have partly
 or fully run. Check with mac_snapshot before retrying." A call completed before the pause keeps its success result.
 Read-only tools and list/get variants still work under their existing policy checks, but cannot launch a new
-automation Safari session while paused. Tell the person and wait;
+automation Safari or Chrome session while paused. Tell the person and wait;
 there is no resume tool, hotkey toggle or menu action. `mac_doctor` reports pause and hotkey registration status, and input to MacMCP's
 own PID, status item or menu is always refused. See [Person control](policy-and-security.md#a-persons-stop-control).
 
@@ -21,7 +21,7 @@ mac_doctor ─▶ mac_snapshot ─▶ mac_click / mac_type / mac_key / mac_menu 
 
 | Tool | What it does |
 | --- | --- |
-| `mac_snapshot` | See an app's UI as element refs, with blockers in the header |
+| `mac_snapshot` | See an app's UI as element refs, with blockers in the header; `since=sN` returns changes since a retained snapshot on this connection |
 | `mac_screenshot` | Pixels of a window, a display (`display=list` to choose one) or a zoomed region (id maps pixels back to the screen); `ocr=true` returns the text on screen with click points instead, for canvases and custom-drawn UI |
 | `mac_click` · `mac_type` · `mac_key` | Act by ref (or screenshot pixel); typing is read back and verified |
 | `mac_menu` | Run menu-bar commands by path (`"Format > Make Plain Text"`) through accessibility |
@@ -29,7 +29,7 @@ mac_doctor ─▶ mac_snapshot ─▶ mac_click / mac_type / mac_key / mac_menu 
 | `mac_app` · `mac_window` | Launch / activate / quit apps (`open=` takes an http(s) or mailto URL or a file, never an app, script or other launcher); list / focus / move / resize / close windows. Neither touches macOS security prompts |
 | `mac_wait` | Wait until settled, or until text / an element / a window appears or goes away; use `until=text ocr=true` for text drawn in canvases. `until=unlock` waits up to 10 min for a person to unlock the screen |
 | `mac_clipboard` | Get or set clipboard text (reads can be disabled by policy). A password a password manager copied is never read or pasted |
-| `mac_script` | AppleScript against literal app targets the policy allows (JXA if `script.jxa` is on); checked again at each outgoing Apple event |
+| `mac_script` | AppleScript against literal app targets the policy allows (JXA if `script.jxa` is on); `action=dictionary app=` reads installed terminology without running a script |
 | `mac_shortcut` | List the person's Shortcuts, and run the ones the policy allows (`input=` text in, text out) |
 | `mac_doctor` | Permissions, session, health, identity and fixes |
 | `web_navigate` · `web_read` | Open a page, or read it as a text tree (`uid=N` on interactive nodes), markdown or a screenshot |
@@ -87,6 +87,60 @@ snapshot whose labels or values couldn't be read says so in a note. See
 [Architecture](architecture.md#refs-and-ids) for details.
 
 For how the `web_*` tools work, see [Architecture](architecture.md#web-tools).
+
+## Incremental observations and direct routes
+
+`mac_snapshot since=s123` returns changes since a snapshot previously returned on the same connection. The last
+64 snapshots across all connections are retained; an expired ID or a reconnect requires a full snapshot. Compare
+the same app, scope and query: a changed window, blocker or filter returns the current full state instead.
+An incomplete read does not report disappeared elements. Only refs actually returned become actionable.
+
+`mac_screenshot app=TextEdit annotate=true` labels up to 100 controls with their AX refs and returns a marked legend.
+It requires a matching, unmoved app window and cannot be combined with OCR or display-only capture. Password fields
+and uncertain identities are excluded. The labels do not prove a control is unobscured; actions still re-resolve
+and check it. The screenshot ID retains its original coordinate mapping.
+
+`mac_script action=dictionary app=TextEdit` summarizes the app's installed scripting terminology. It is a bounded,
+read-only operation under app policy; it does not run source, request Automation consent or enable scripting.
+Running a script still uses `source=` and needs the existing script allowlist and permissions. After a button click,
+a same-named, unambiguous exposed menu item may be suggested. Discovery never opens or presses menus, and a title
+match is a hint rather than proof that the commands have the same effect.
+
+## MCP results and session consent
+
+Tool definitions include `outputSchema`. Results retain their text/image content and add `structuredContent` with
+`ok`, the same marked `text`, and optional `data` metadata. Snapshot metadata includes the ID, PID, row count and
+read completeness. Screen text stays untrusted in both representations.
+
+A client's `_meta.progressToken` opts a call into bounded `notifications/progress` messages while it runs. The
+increasing count is a heartbeat, not a percentage or a promise of completion. There are no notifications after the
+result, cancellation or disconnection. Long calls retain their existing deadlines and cancellation behavior.
+
+A person can configure `mac-mcp --require-consent` (also combinable with `--background`). The first mutating call
+asks permission for this connection through MCP form elicitation. Missing form support, a decline, a cancellation
+or a 120-second timeout permits no action. Reconnection or agent restart requires consent again. Legacy clients
+receive `elicitation/create`; revision 2026-07-28 uses `input_required` and a one-use, call-bound `requestState`.
+Consent never changes the approved policy, grants OS permissions, resumes a pause or bypasses a guard.
+
+## Chrome automation
+
+Pass `browser=chrome` on each `web_*` call to use an isolated, headless Google Chrome installed in `/Applications`.
+Omit it for Safari. Each backend has its own tabs and node IDs; Chrome handles and UIDs cannot be used with Safari.
+Chrome starts with a fresh private profile and incognito context, never a person's logins, extensions or windows.
+Cookies live only for the automation session. Downloads and local-file uploads are disabled.
+
+Chrome supports page trees, article text through `as=markdown`, screenshots, navigation, tabs, JavaScript dialogs,
+console/network logs and guarded evaluation. Web policy, Chrome's app policy and `web.eval_allowed` apply. Page
+requests intercepted by CDP are checked too. Typed input/textarea values are verified before submission; text is
+not echoed in the tree. Clicks and hover need an unobscured target. Keys accept unmodified named keys or a single
+character. Rich content-editable editors, arbitrary modified chords and cross-frame element actions are not
+supported. Node IDs expire on navigation, page changes or session restart: read again instead of guessing.
+
+Chrome returns a bounded main-frame tree (3,000 nodes, depth 20), up to 32 tool-created tabs and 100 recent log
+entries. Its markdown view is article text, without Safari's richer conversion. A dialog interrupts the sequence;
+answer it with `web_dialog browser=chrome`, then inspect before sending remaining actions. A cancelled or failed
+protocol call closes the isolated session; never assume an already-sent action did not happen. Background-mode
+connections continue to refuse all `web_*` calls.
 
 ## Background mode
 

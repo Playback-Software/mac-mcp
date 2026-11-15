@@ -63,6 +63,14 @@ enum WebTools {
         switch args.string("as") ?? "text" {
         case "screenshot":
             return await run("screenshot", [:]) { reply in
+                if AutomationBrowser.isChrome {
+                    guard let base64 = reply.json?["data"]?.stringValue, let data = Data(base64Encoded: base64),
+                          let (png, size) = scaledPNG(data, maxEdge: args.int("max_edge") ?? 1280) else {
+                        return .error("Chrome did not return a readable screenshot.")
+                    }
+                    return ToolOutput(content: [.text("Isolated Chrome page, \(Int(size.width))x\(Int(size.height)) px. \(imageNote)"),
+                        .image(base64: png.base64EncodedString(), mimeType: "image/png")], auditDetail: "Chrome screenshot")
+                }
                 guard let path = reply.text.firstMatch(of: /'([^']+\.png)'/)?.1 else { return .error("No screenshot: \(reply.text)") }
                 defer { try? FileManager.default.removeItem(atPath: String(path)) }
                 guard let (png, size) = scaledPNG(String(path), maxEdge: args.int("max_edge") ?? 1280) else {
@@ -76,7 +84,7 @@ enum WebTools {
         case "markdown":
             // Safari's navigate_to_url and page_interactions reply in the format of the last get_page_content call;
             // the bridge puts the text tree back in the same turn, so nothing queued can run in between.
-            return await run({ try await SafariBridge.shared.readMarkdown() }) { reply in
+            return await run({ try await AutomationBrowser.shared.readMarkdown() }) { reply in
                 .text(pageText(reply.json, fallback: reply.text, maxChars: args.int("max_chars")))
             }
         default:
@@ -128,7 +136,7 @@ enum WebTools {
         if args.bool("full_text") == true { a["fullText"] = true }
         if let blocked = await sessionGuard() { return blocked }
         do {
-            switch try await SafariBridge.shared.interact(a) {
+            switch try await AutomationBrowser.shared.interact(a) {
             case let .done(reply):
                 return await report(reply, steps: steps, requested: interactions.count)
             case let .dialog(message):
@@ -208,11 +216,12 @@ enum WebTools {
 
     /// Reads back each typed field (unless the step submitted, which usually leaves the page).
     static func verifyTyped(_ steps: [Value]) async -> [String] {
+        if AutomationBrowser.isChrome { return [] } // Chrome verifies each edit before sending the next step.
         var problems: [String] = []
         for step in steps where step["do"] == "type" && step["submit"]?.boolValue != true {
             guard let node = step["node"]?.stringValue ?? step["node"]?.intValue.map(String.init),
                   let expected = step["value"]?.stringValue, Int(node) != nil else { continue }
-            guard let reply = try? await SafariBridge.shared.call("evaluate_javascript", [
+            guard let reply = try? await AutomationBrowser.shared.call("evaluate_javascript", [
                 "expression": .string("const e = $uid(\(node)); return e ? (e.value ?? e.textContent ?? '') : null"),
             ], timeout: 10), !reply.isError else { continue }
             let actual = reply.json?.stringValue ?? reply.text
@@ -341,7 +350,7 @@ enum WebTools {
             if let text = args.string("text") { a["inputText"] = .string(text) }
             let result = await run("browser_dialogs", a) { reply in
                 // The web_act step the dialog interrupted now completes; report it too.
-                guard let finished = await SafariBridge.shared.finishParked() else { return .text(Untrusted.wrap(reply.text)) }
+                guard let finished = await AutomationBrowser.shared.finishParked() else { return .text(Untrusted.wrap(reply.text)) }
                 let rest = await report(finished, steps: [], requested: 1)
                 return ToolOutput(content: [.text("\(Untrusted.wrap(reply.text))\nThe interrupted step then finished:")] + rest.content,
                                   isError: rest.isError)
@@ -359,7 +368,7 @@ enum WebTools {
     /// Runs one safarimcp tool and formats its reply; bridge failures and tool errors become explained errors.
     static func run(_ tool: String, _ arguments: [String: Value], timeout: TimeInterval = 45,
                     _ format: (SafariBridge.Reply) async -> ToolOutput) async -> ToolOutput {
-        await run({ try await SafariBridge.shared.call(tool, arguments, timeout: timeout) }, format)
+        await run({ try await AutomationBrowser.shared.call(tool, arguments, timeout: timeout) }, format)
     }
 
     /// Runs one bridge operation (a call, or a transaction such as a markdown read) and formats its reply.
@@ -377,7 +386,7 @@ enum WebTools {
 
     /// What Safari said when a call failed. The log keeps its size, not the text: it can echo the page or the code.
     static func safariFailure(_ reply: SafariBridge.Reply) -> ToolOutput {
-        var why = "Safari:\n\(Untrusted.wrap(reply.text))"
+        var why = "\(AutomationBrowser.name):\n\(Untrusted.wrap(reply.text))"
         if reply.text.localizedCaseInsensitiveContains("remote automation") || reply.text.localizedCaseInsensitiveContains("not enabled") {
             why += "\nA person must enable Safari ▸ Settings ▸ Developer ▸ \"Allow remote automation and external agents\" (the Developer tab appears after Advanced ▸ \"Show features for web developers\")."
         }
@@ -413,15 +422,15 @@ enum WebTools {
         switch await currentPolicy() {
         case let .failure(out): return out
         case let .success(p):
-            if let refusal = p.refusal(bundleID: "com.apple.Safari", name: "Safari") { return .error(refusal) }
+            if let refusal = p.refusal(bundleID: AutomationBrowser.bundleID, name: AutomationBrowser.name) { return .error(refusal) }
             return p.web.refusal(url: url).map { .error($0) }
         }
     }
 
     /// The policy check for the page currently open (reads and actions on a denied host are refused too).
     static func currentPageGuard() async -> ToolOutput? {
-        guard SafariBridge.shared.status != nil else { return await webGuard(url: "about:blank") }
-        guard let info = try? await SafariBridge.shared.call("page_info", [:], timeout: 10), !info.isError,
+        guard await AutomationBrowser.shared.started else { return await webGuard(url: "about:blank") }
+        guard let info = try? await AutomationBrowser.shared.call("page_info", [:], timeout: 10), !info.isError,
               let url = info.json?["url"]?.stringValue else { return await webGuard(url: "about:blank") }
         return await webGuard(url: url)
     }
@@ -429,7 +438,7 @@ enum WebTools {
     /// After a navigation or click landed somewhere the policy forbids: leave the page, then refuse.
     static func leaveIfRefused(_ url: String) async -> ToolOutput? {
         guard let refusal = await webGuard(url: url) else { return nil }
-        _ = try? await SafariBridge.shared.call("navigate_to_url", ["url": "about:blank"], timeout: 15)
+        _ = try? await AutomationBrowser.shared.call("navigate_to_url", ["url": "about:blank"], timeout: 15)
         return refusal
     }
 
@@ -449,7 +458,12 @@ enum WebTools {
     static func tabUUID(_ handle: String) -> String { handle.hasPrefix("page-") ? String(handle.dropFirst(5)) : handle }
 
     static func scaledPNG(_ path: String, maxEdge: Int) -> (Data, CGSize)? {
-        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        return scaledPNG(data, maxEdge: maxEdge)
+    }
+
+    static func scaledPNG(_ data: Data, maxEdge: Int) -> (Data, CGSize)? {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateThumbnailAtIndex(src, 0, [
                   kCGImageSourceCreateThumbnailFromImageAlways: true,
                   kCGImageSourceThumbnailMaxPixelSize: max(maxEdge, 200),
