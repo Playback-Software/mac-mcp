@@ -64,35 +64,73 @@ import Testing
         #expect(annotated.dataProvider?.data != source.dataProvider?.data)
     }
 
-    @Test func notificationsResetQuietTimeEvenWhenTheSignatureStaysTheSame() async {
-        let generation = Mutex<UInt64>(0)
-        let result = await Settle.wait(quiet: 100, timeout: 0.6, events: { generation.withLock { $0 } }) {
-            generation.withLock { $0 += 1 }
-            return 42
+    /// Advances only when the settle loop sleeps; host scheduling cannot change sample counts.
+    private final class TestClock: Sendable {
+        private struct State {
+            var now = ContinuousClock.now
+            var delays: [Duration] = []
         }
+        private let state = Mutex(State())
+        let oversleep: Duration
+        init(oversleep: Duration = .zero) { self.oversleep = oversleep }
+        var now: ContinuousClock.Instant { state.withLock { $0.now } }
+        var delays: [Duration] { state.withLock { $0.delays } }
+        func sleep(_ duration: Duration) async throws {
+            try Task.checkCancellation()
+            state.withLock { $0.delays.append(duration); $0.now = $0.now.advanced(by: duration + oversleep) }
+        }
+    }
+
+    @Test func notificationsResetQuietTimeEvenWhenTheSignatureStaysTheSame() async {
+        let clock = TestClock()
+        let generation = Mutex<UInt64>(0)
+        let result = await Settle.wait(quiet: 100, timeout: 0.6,
+            events: { generation.withLock { $0 } }, clock: { clock.now }, suspend: { try await clock.sleep($0) }) {
+                generation.withLock { $0 += 1 }
+                return 42
+            }
         #expect(!result.settled)
     }
 
     @Test func delayedObservationUsesTheNotificationTimeInsteadOfThePollTime() async {
+        let clock = TestClock()
         let generation = Mutex<UInt64>(0)
         let delivered = Mutex<ContinuousClock.Instant?>(nil)
         var samples = 0
         let result = await Settle.wait(quiet: 250, timeout: 2,
-            events: { generation.withLock { $0 } }, lastEvent: { delivered.withLock { $0 } }) {
+            events: { generation.withLock { $0 } }, lastEvent: { delivered.withLock { $0 } },
+            clock: { clock.now }, suspend: { try await clock.sleep($0) }) {
                 samples += 1
-                if samples == 1 { delivered.withLock { $0 = .now } }
+                if samples == 1 { delivered.withLock { $0 = clock.now } }
                 if samples == 2 { generation.withLock { $0 = 1 } }
                 return 7
             }
         #expect(result.settled)
-        #expect(samples <= 3, "An already-delivered notification must not restart the quiet period at a later poll")
+        #expect(samples == 3, "An already-delivered notification must not restart the quiet period at a later poll")
+        #expect(result.milliseconds == 310)
     }
 
     @Test func observerModeStillSamplesAndFallsBackWhenUnsupported() async {
+        let eventClock = TestClock(), fallbackClock = TestClock()
         var eventSamples = 0, fallbackSamples = 0
-        let observed = await Settle.wait(quiet: 250, timeout: 2, events: { 0 }) { eventSamples += 1; return 7 }
-        let fallback = await Settle.wait(quiet: 250, timeout: 2, events: { nil }) { fallbackSamples += 1; return 7 }
+        let observed = await Settle.wait(quiet: 250, timeout: 2, events: { 0 },
+            clock: { eventClock.now }, suspend: { try await eventClock.sleep($0) }) { eventSamples += 1; return 7 }
+        let fallback = await Settle.wait(quiet: 250, timeout: 2, events: { nil },
+            clock: { fallbackClock.now }, suspend: { try await fallbackClock.sleep($0) }) { fallbackSamples += 1; return 7 }
         #expect(observed.settled && fallback.settled)
-        #expect(eventSamples >= 2 && eventSamples < fallbackSamples)
+        #expect(eventSamples == 3 && fallbackSamples == 5)
+        #expect(eventClock.delays == [.milliseconds(60), .milliseconds(160), .milliseconds(90)])
+        #expect(fallbackClock.delays == [.milliseconds(60), .milliseconds(80), .milliseconds(80), .milliseconds(80), .milliseconds(10)])
+    }
+
+    @Test func delayedWakeupsCanCoalesceBothPollingModesWithoutSkippingVerification() async {
+        let eventClock = TestClock(oversleep: .milliseconds(500)), fallbackClock = TestClock(oversleep: .milliseconds(500))
+        var eventSamples = 0, fallbackSamples = 0
+        let observed = await Settle.wait(quiet: 250, timeout: 2, events: { 0 },
+            clock: { eventClock.now }, suspend: { try await eventClock.sleep($0) }) { eventSamples += 1; return 7 }
+        let fallback = await Settle.wait(quiet: 250, timeout: 2, events: { nil },
+            clock: { fallbackClock.now }, suspend: { try await fallbackClock.sleep($0) }) { fallbackSamples += 1; return 7 }
+        #expect(observed.settled && fallback.settled)
+        #expect(eventSamples == 2 && fallbackSamples == 2)
     }
 }

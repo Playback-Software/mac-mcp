@@ -136,30 +136,34 @@ public enum Settle {
 
     /// The settle loop over any sampler, so it can be tested without a UI. A nil sample is "not comparable" and
     /// restarts the quiet period. Cancellation ends the wait at once, unsettled.
+    /// Clock/sleep injection makes cadence assertions independent of host scheduling; production uses monotonic time.
     static func wait(quiet: Int, timeout: TimeInterval, events: (@Sendable () -> UInt64?)? = nil,
-                     lastEvent: (@Sendable () -> ContinuousClock.Instant?)? = nil, sample: () async -> Int?) async -> Result {
-        let started = ContinuousClock.now
-        func elapsed() -> Int { Int(started.duration(to: .now) / .milliseconds(1)) }
+                     lastEvent: (@Sendable () -> ContinuousClock.Instant?)? = nil,
+                     clock: () -> ContinuousClock.Instant = { .now },
+                     suspend: (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+                     sample: () async -> Int?) async -> Result {
+        let started = clock()
+        func elapsed() -> Int { Int(started.duration(to: clock()) / .milliseconds(1)) }
         func unsettled() -> Result { Result(settled: false, milliseconds: elapsed()) }
-        do { try await Task.sleep(for: .milliseconds(60)) } catch { return unsettled() }   // let the app start reacting
+        do { try await suspend(.milliseconds(60)) } catch { return unsettled() }   // let the app start reacting
         var last = await sample()
         var generation = events?()
-        var stableSince = ContinuousClock.now
-        while started.duration(to: .now) < .seconds(timeout) {
-            do { try await Task.sleep(for: min(.milliseconds(generation == nil ? 80 : 160),
-                max(.milliseconds(1), .milliseconds(quiet) - stableSince.duration(to: .now)))) } catch { return unsettled() }
+        var stableSince = clock()
+        while started.duration(to: clock()) < .seconds(timeout) {
+            do { try await suspend(min(.milliseconds(generation == nil ? 80 : 160),
+                max(.milliseconds(1), .milliseconds(quiet) - stableSince.duration(to: clock())))) } catch { return unsettled() }
             if Task.isCancelled { return unsettled() }
-            let now = await sample()
+            let current = await sample()
             let observed = events?()
-            if now == nil || now != last {
-                stableSince = .now
+            if current == nil || current != last {
+                stableSince = clock()
             } else if observed != generation {
                 // Count from delivery, not from the later poll that notices the notification.
-                stableSince = max(stableSince, lastEvent?() ?? .now)
+                stableSince = max(stableSince, lastEvent?() ?? clock())
             }
-            last = now
+            last = current
             generation = observed
-            if now != nil && stableSince.duration(to: .now) >= .milliseconds(quiet) {
+            if current != nil && stableSince.duration(to: clock()) >= .milliseconds(quiet) {
                 return Result(settled: true, milliseconds: elapsed())
             }
         }
